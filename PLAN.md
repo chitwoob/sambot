@@ -13,13 +13,14 @@ SamBot automates the software development lifecycle by connecting GitHub Project
 │  Slack App   │◄──────►│    SamBot Core    │◄──────►│  GitHub API  │
 │  (Bolt SDK)  │        │  (FastAPI + RQ)   │        │ (PyGitHub /  │
 │              │        │                   │        │  GraphQL)    │
-│ • Create     │        │ • Webhook handler │        │              │
-│   tickets    │        │ • Job runner      │        │ • Projects V2│
-│ • Answer     │        │ • Coding Agent    │        │ • Issues     │
-│   agent Q's  │        │ • Memory manager  │        │ • PRs        │
-│ • View       │        │ • Test runner     │        │ • Branches   │
-│   progress   │        │ • LLM client      │        └──────────────┘
-└─────────────┘        └────────┬─────────┘
+│ • Create     │        │ • Poller (polls   │        │              │
+│   tickets    │        │   project board)  │        │ • Projects V2│
+│ • Answer     │        │ • Job runner      │        │ • Issues     │
+│   agent Q's  │        │ • Coding Agent    │        │ • PRs        │
+│ • View       │        │ • Memory manager  │        │ • Branches   │
+│   progress   │        │ • Test runner     │        └──────────────┘
+└─────────────┘        │ • LLM client      │
+                        └────────┬─────────┘
                                  │
                         ┌────────▼─────────┐
                         │   Anthropic API   │
@@ -69,7 +70,7 @@ sambot/
 │       ├── github/            # GitHub interactions
 │       │   ├── client.py      # REST + GraphQL client
 │       │   ├── projects.py    # Projects V2 operations
-│       │   ├── webhooks.py    # Webhook event handlers
+│       │   ├── poller.py      # Polls project board for status changes
 │       │   └── pr.py          # PR creation & management
 │       ├── slack/             # Slack interactions
 │       │   ├── app.py         # Bolt app setup
@@ -145,7 +146,7 @@ PASS N:
 ## Workflow: Story → PR
 
 ```
-1. Trigger: Story → "In Progress" OR `/sambot start <issue>`
+1. Trigger: Poller detects story → "In Progress" OR `/sambot start <issue>`
 2. Fetch issue + load MEMORY.md
 3. Create branch from develop: feature/<num>-slug
 4. Agent loop (multi-pass):

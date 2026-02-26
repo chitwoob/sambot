@@ -29,7 +29,8 @@ SamBot is a Python-based SDLC automation tool that:
 ## Stack Summary
 
 - **Language:** Python 3.12+
-- **Framework:** FastAPI (webhooks, API) + slack-bolt (Slack)
+- **Framework:** FastAPI (API / health) + slack-bolt (Slack)
+- **Event Detection:** Polling (GitHub Projects V2 board, configurable interval)
 - **Task Queue:** Redis + RQ
 - **Database:** SQLite via SQLModel
 - **LLM:** Anthropic Claude Sonnet 4.5 (via `anthropic` SDK)
@@ -54,6 +55,7 @@ SamBot is a Python-based SDLC automation tool that:
 9. **Memory compression** — After each job, new facts compressed into MEMORY.md
 10. **GraphQL for Projects V2** — Required by GitHub (no REST for v2 projects)
 11. **Slack Socket Mode** — No public URL needed for Slack events
+12. **Polling over webhooks** — Runs behind NAT/firewall; no inbound connectivity needed
 
 ---
 
@@ -61,14 +63,14 @@ SamBot is a Python-based SDLC automation tool that:
 
 ```
 src/sambot/
-├── main.py          — FastAPI app, lifespan, routers
+├── main.py          — FastAPI app, lifespan, poller startup
 ├── config.py        — Pydantic Settings (env vars)
 ├── models.py        — SQLModel models (jobs, questions)
 ├── db.py            — Database engine & session
 ├── github/          — All GitHub interactions
 │   ├── client.py    — Authenticated GitHub client (REST + GraphQL)
 │   ├── projects.py  — Projects V2 GraphQL operations
-│   ├── webhooks.py  — Webhook event handlers
+│   ├── poller.py    — Polls project board for status changes
 │   └── pr.py        — PR creation & branch management
 ├── slack/           — All Slack interactions
 │   ├── app.py       — Bolt app setup
@@ -119,6 +121,7 @@ src/sambot/
 | 2026-02-26 | develop as base branch                      | Standard gitflow, protect main     |
 | 2026-02-26 | Test gating for PRs                         | Quality assurance                  |
 | 2026-02-26 | Memory compression after jobs               | Persistent learning, context mgmt  |
+| 2026-02-26 | Polling over webhooks                       | Docker behind NAT, no inbound ports |
 
 ---
 

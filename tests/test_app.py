@@ -10,13 +10,3 @@ def test_health_check(client):
     data = response.json()
     assert data["status"] == "ok"
     assert "version" in data
-
-
-def test_webhook_endpoint_exists(client):
-    """Webhook endpoint accepts POST requests."""
-    response = client.post(
-        "/webhooks/github",
-        json={"action": "test"},
-        headers={"X-GitHub-Event": "ping"},
-    )
-    assert response.status_code == 200

@@ -19,7 +19,6 @@ class Settings(BaseSettings):
 
     # --- GitHub ---
     github_token: str = Field(description="GitHub personal access token")
-    github_webhook_secret: str = Field(default="", description="GitHub webhook secret for signature verification")
     github_repo: str = Field(description="Target repo in owner/repo format")
     github_project_number: int = Field(default=1, description="GitHub Projects V2 project number")
 
@@ -41,6 +40,7 @@ class Settings(BaseSettings):
     sambot_max_agent_passes: int = Field(default=5, description="Maximum coding passes per story")
     sambot_question_timeout_minutes: int = Field(default=30, description="Minutes to wait for Slack Q&A response")
     sambot_base_branch: str = Field(default="develop", description="Base branch for PRs")
+    sambot_poll_interval: int = Field(default=30, description="Seconds between GitHub polling cycles")
 
     @property
     def github_owner(self) -> str:
