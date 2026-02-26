@@ -11,7 +11,7 @@ from sambot.agent.coder import Coder
 from sambot.agent.memory import MemoryManager, compress_memory
 from sambot.agent.test_runner import TestRunner
 from sambot.agent.tools import ToolExecutor
-from sambot.llm.prompts import CODING_AGENT_SYSTEM
+from sambot.llm.prompts import CODING_AGENT_SYSTEM, build_system_prompt
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -62,6 +62,7 @@ class AgentLoop:
         anthropic_client,
         memory_path: Path | None = None,
         max_passes: int = 5,
+        max_memory_tokens: int = 2000,
         model: str = "claude-sonnet-4-20250514",
         on_progress: Any | None = None,
         ask_question_handler: Any | None = None,
@@ -75,7 +76,7 @@ class AgentLoop:
         self._questions_asked: list[dict] = []
 
         # Initialize components
-        self._memory = MemoryManager(memory_path)
+        self._memory = MemoryManager(memory_path, max_tokens=max_memory_tokens)
         self._tools = ToolExecutor(work_dir)
         self._test_runner = TestRunner(work_dir)
         self._coder = Coder(
@@ -121,7 +122,8 @@ class AgentLoop:
 
         # Build context from memory + story
         story_context = self._memory.build_story_context(story_title, story_body, labels)
-        system_prompt = CODING_AGENT_SYSTEM + "\n\n" + story_context
+        memory_content = self._memory.load()
+        system_prompt = build_system_prompt(CODING_AGENT_SYSTEM, memory_content) + "\n\n" + story_context
 
         for pass_num in range(1, self._max_passes + 1):
             self._progress(f"📋 Pass {pass_num}/{self._max_passes}")
@@ -198,6 +200,11 @@ class AgentLoop:
             return
 
         self._progress("🧠 Compressing new facts into memory...")
-        updated_memory = compress_memory(llm_client, current_memory, new_facts)
+        updated_memory = compress_memory(
+            llm_client,
+            current_memory,
+            new_facts,
+            max_tokens=self._memory.max_tokens,
+        )
         self._memory.save(updated_memory)
         self._progress("🧠 Memory updated.")

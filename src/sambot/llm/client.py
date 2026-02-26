@@ -1,6 +1,7 @@
 """Anthropic Claude client wrapper — memory-aware.
 
-Every LLM call includes the project memory as context.
+Every LLM call can include the project memory as context via
+``build_system_prompt`` from ``llm.prompts``.
 """
 
 from __future__ import annotations
@@ -19,9 +20,9 @@ logger = structlog.get_logger()
 class LLMClient:
     """Wrapper around the Anthropic SDK for Claude interactions.
 
-    All calls to `complete()` automatically include the project memory
-    in the system prompt. Use `complete_raw()` for calls without memory
-    injection (e.g., memory compression itself).
+    ``complete()`` auto-injects project memory into the system prompt
+    using ``build_system_prompt``.  Use ``complete_raw()`` for calls
+    that must NOT include memory (e.g., memory compression itself).
     """
 
     def __init__(self, settings: Settings, memory_content: str = "") -> None:
@@ -40,7 +41,7 @@ class LLMClient:
         return self._model
 
     def set_memory(self, memory_content: str) -> None:
-        """Update the memory content included in all calls."""
+        """Update the memory content included in ``complete()`` calls."""
         self._memory = memory_content
 
     def complete(
@@ -52,15 +53,12 @@ class LLMClient:
     ) -> str:
         """Send a prompt to Claude with project memory injected.
 
-        The memory is prepended to the system prompt automatically.
+        The memory is prepended to the system prompt automatically
+        via ``build_system_prompt``.
         """
-        # Build system prompt with memory
-        system_parts = []
-        if self._memory:
-            system_parts.append(f"## Project Memory\n\n{self._memory}")
-        if system:
-            system_parts.append(system)
-        full_system = "\n\n---\n\n".join(system_parts) if system_parts else ""
+        from sambot.llm.prompts import build_system_prompt
+
+        full_system = build_system_prompt(system, self._memory)
 
         return self.complete_raw(
             prompt=prompt,

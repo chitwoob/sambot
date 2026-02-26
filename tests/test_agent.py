@@ -249,3 +249,131 @@ def test_memory_manager_build_story_context_no_labels(tmp_path: Path):
     mgr = MemoryManager(memory_path=mem_file)
     context = mgr.build_story_context(story_title="Story", story_body="Body")
     assert "Labels" not in context
+
+
+# ---------- MemoryManager budget tests ----------
+
+
+def test_memory_manager_token_budget(tmp_path: Path):
+    """MemoryManager exposes max_tokens and max_chars."""
+    from sambot.agent.memory import MemoryManager
+
+    mgr = MemoryManager(memory_path=tmp_path / "m.md", max_tokens=1000)
+    assert mgr.max_tokens == 1000
+    assert mgr.max_chars == 4000  # 4 chars per token
+
+
+def test_memory_manager_is_over_budget(tmp_path: Path):
+    """is_over_budget detects when memory exceeds the soft limit."""
+    from sambot.agent.memory import MemoryManager
+
+    mem_file = tmp_path / "m.md"
+    # 500 tokens * 4 chars = 2000 chars budget
+    mgr = MemoryManager(memory_path=mem_file, max_tokens=500)
+
+    # Under budget
+    mem_file.write_text("x" * 1999)
+    assert mgr.is_over_budget() is False
+
+    # Over budget
+    mem_file.write_text("x" * 2001)
+    assert mgr.is_over_budget() is True
+
+
+def test_memory_manager_default_budget(tmp_path: Path):
+    """Default token budget is 2000."""
+    from sambot.agent.memory import MemoryManager
+
+    mgr = MemoryManager(memory_path=tmp_path / "m.md")
+    assert mgr.max_tokens == 2000
+
+
+def test_memory_manager_save_creates_dirs(tmp_path: Path):
+    """MemoryManager.save creates parent directories."""
+    from sambot.agent.memory import MemoryManager
+
+    deep_path = tmp_path / "a" / "b" / "mem.md"
+    mgr = MemoryManager(memory_path=deep_path)
+    mgr.save("deep content")
+    assert deep_path.read_text() == "deep content"
+
+
+# ---------- BacklogAgent parser tests ----------
+
+
+def test_backlog_parse_story_response():
+    """BacklogAgent._parse_story_response parses structured output."""
+    from sambot.agent.backlog import BacklogAgent
+
+    response = (
+        "TITLE: Add user authentication\n\n"
+        "DESCRIPTION:\nImplement JWT-based auth flow.\n\n"
+        "ACCEPTANCE CRITERIA:\n"
+        "- Users can sign up with email/password\n"
+        "- Login returns a JWT token\n"
+        "- Protected routes require valid token\n\n"
+        "LABELS: feature, auth\n\n"
+        "FOLLOW-UP QUESTIONS: none"
+    )
+
+    parsed = BacklogAgent._parse_story_response(response)
+    assert parsed["title"] == "Add user authentication"
+    assert "JWT-based auth" in parsed["description"]
+    assert len(parsed["acceptance_criteria"]) == 3
+    assert "feature" in parsed["labels"]
+    assert "auth" in parsed["labels"]
+    assert parsed["follow_up_questions"] == []
+
+
+def test_backlog_parse_with_questions():
+    """Parser extracts follow-up questions."""
+    from sambot.agent.backlog import BacklogAgent
+
+    response = (
+        "TITLE: Fix checkout bug\n\n"
+        "DESCRIPTION:\nCart total is incorrect.\n\n"
+        "ACCEPTANCE CRITERIA:\n"
+        "- Total matches sum of items\n\n"
+        "LABELS: bug\n\n"
+        "FOLLOW-UP QUESTIONS:\n"
+        "- Does this include tax calculations?\n"
+        "- Which payment providers are affected?"
+    )
+
+    parsed = BacklogAgent._parse_story_response(response)
+    assert parsed["title"] == "Fix checkout bug"
+    assert len(parsed["follow_up_questions"]) == 2
+    assert "tax" in parsed["follow_up_questions"][0]
+
+
+# ---------- System prompts tests ----------
+
+
+def test_build_system_prompt_with_memory():
+    """build_system_prompt injects memory into the preamble."""
+    from sambot.llm.prompts import build_system_prompt
+
+    result = build_system_prompt("Agent instructions here.", "KEY FACT: use Python 3.12+")
+    assert "KEY FACT: use Python 3.12+" in result
+    assert "Agent instructions here." in result
+    assert "Project Memory" in result.lower() or "project memory" in result
+
+
+def test_build_system_prompt_without_memory():
+    """build_system_prompt works without memory."""
+    from sambot.llm.prompts import build_system_prompt
+
+    result = build_system_prompt("Do the thing.")
+    assert "Do the thing." in result
+    assert "No project memory available" in result
+
+
+def test_all_agent_prompts_exist():
+    """All expected agent system prompts are defined."""
+    from sambot.llm import prompts
+
+    assert hasattr(prompts, "CODING_AGENT_SYSTEM")
+    assert hasattr(prompts, "BACKLOG_AGENT_SYSTEM")
+    assert hasattr(prompts, "STORY_REFINEMENT_SYSTEM")
+    assert hasattr(prompts, "PR_DESCRIPTION_SYSTEM")
+    assert hasattr(prompts, "MEMORY_COMPRESSION_SYSTEM")

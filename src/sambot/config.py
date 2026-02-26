@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     slack_app_token: str = Field(default="", description="Slack app-level token (xapp-)")
     slack_signing_secret: str = Field(default="", description="Slack signing secret")
     slack_progress_channel: str = Field(default="sambot-progress", description="Slack channel for progress updates")
+    slack_questions_channel: str = Field(default="sambot-questions", description="Slack channel for agent Q&A")
+    slack_backlog_channel: str = Field(default="sambot-backlog", description="Slack channel for backlog story building")
 
     # --- Redis ---
     redis_url: str = Field(default="redis://localhost:6379/0", description="Redis connection URL")
@@ -41,6 +43,7 @@ class Settings(BaseSettings):
     sambot_question_timeout_minutes: int = Field(default=30, description="Minutes to wait for Slack Q&A response")
     sambot_base_branch: str = Field(default="develop", description="Base branch for PRs")
     sambot_poll_interval: int = Field(default=30, description="Seconds between GitHub polling cycles")
+    sambot_memory_max_tokens: int = Field(default=2000, description="Soft token limit for agent memory (approx 4 chars/token)")
 
     @property
     def github_owner(self) -> str:

@@ -9,24 +9,25 @@ SamBot automates the software development lifecycle by connecting GitHub Project
 ## Architecture Overview
 
 ```
-┌─────────────┐        ┌──────────────────┐        ┌──────────────┐
-│  Slack App   │◄──────►│    SamBot Core    │◄──────►│  GitHub API  │
-│  (Bolt SDK)  │        │  (FastAPI + RQ)   │        │ (PyGitHub /  │
-│              │        │                   │        │  GraphQL)    │
-│ • Create     │        │ • Poller (polls   │        │              │
-│   tickets    │        │   project board)  │        │ • Projects V2│
-│ • Answer     │        │ • Job runner      │        │ • Issues     │
-│   agent Q's  │        │ • Coding Agent    │        │ • PRs        │
-│ • View       │        │ • Memory manager  │        │ • Branches   │
-│   progress   │        │ • Test runner     │        └──────────────┘
-└─────────────┘        │ • LLM client      │
-                        └────────┬─────────┘
+┌─────────────────┐    ┌──────────────────┐        ┌──────────────┐
+│  Slack App      │◄──►│    SamBot Core    │◄──────►│  GitHub API  │
+│  (Bolt SDK)     │    │  (FastAPI + RQ)   │        │ (PyGitHub /  │
+│                 │    │                   │        │  GraphQL)    │
+│ 3 Channels:     │    │ • Poller (polls   │        │              │
+│ • #backlog      │    │   project board)  │        │ • Projects V2│
+│   (story build) │    │ • Backlog Agent   │        │ • Issues     │
+│ • #questions    │    │ • Coding Agent    │        │ • PRs        │
+│   (agent Q&A)   │    │ • Memory manager  │        │ • Branches   │
+│ • #progress     │    │ • Test runner     │        └──────────────┘
+│   (status)      │    │ • LLM client      │
+└─────────────────┘    └────────┬─────────┘
                                  │
                         ┌────────▼─────────┐
                         │   Anthropic API   │
                         │   Claude Sonnet   │
                         │       4.5         │
                         │ • Code generation │
+                        │ • Backlog stories │
                         │ • Story refinement│
                         │ • PR descriptions │
                         │ • Memory compress │
@@ -72,16 +73,17 @@ sambot/
 │       │   ├── projects.py    # Projects V2 operations
 │       │   ├── poller.py      # Polls project board for status changes
 │       │   └── pr.py          # PR creation & management
-│       ├── slack/             # Slack interactions
+│       ├── slack/             # Slack interactions (3 channels)
 │       │   ├── app.py         # Bolt app setup
 │       │   ├── commands.py    # Slash commands
 │       │   ├── views.py       # Modal views
-│       │   ├── progress.py    # Agent progress streaming
-│       │   └── questions.py   # Agent ↔ human Q&A
+│       │   ├── progress.py    # #progress — agent status streaming
+│       │   └── questions.py   # #questions — agent ↔ human Q&A
 │       ├── agent/             # Custom AI coding agent
 │       │   ├── loop.py        # Multi-pass agent loop
 │       │   ├── coder.py       # Code generation via Claude
-│       │   ├── memory.py      # Persistent memory + compression
+│       │   ├── backlog.py     # #backlog — story refinement agent
+│       │   ├── memory.py      # Per-agent memory + compression
 │       │   ├── tools.py       # Agent tools (read/write/list)
 │       │   └── test_runner.py # Run tests, parse results
 │       ├── llm/               # LLM interactions
@@ -117,10 +119,12 @@ PASS N:
 ```
 
 ### 3. Memory System
-- **Project memory** (`MEMORY.md`): Persistent facts about the project
+- **Coding agent memory** (`MEMORY.md`): Persistent facts about the project
+- **Backlog agent memory** (`backlog_memory.md`): Facts about stories and backlog
 - **Per-job context**: Story + conversation history
-- **Compression**: After each job, Claude compresses new learnings into memory
-- **Inclusion**: Every LLM call gets current memory as system context
+- **Token budgets**: Each memory has a configurable max_tokens limit (default 2000)
+- **Compression**: After each job, Claude compresses new learnings into memory within budget
+- **Inclusion**: Every LLM call gets current memory via `build_system_prompt()`
 
 ### 4. Branch Strategy
 - Base branch: `develop`
@@ -137,9 +141,29 @@ PASS N:
 
 ### 6. Slack Q&A
 - Agent can ask technical or business questions via Slack
-- Questions posted to progress channel in a thread
+- Questions posted to `#sambot-questions` channel in a thread
 - Agent pauses until human responds (or timeout)
 - Response fed back into agent context
+
+### 7. Three Slack Channels
+| Channel               | Purpose                                          |
+|-----------------------|--------------------------------------------------|
+| `#sambot-backlog`     | Build & refine stories interactively via backlog agent |
+| `#sambot-questions`   | Coding agent asks humans clarifying questions    |
+| `#sambot-progress`    | Real-time status updates on story implementation |
+
+### 8. Centralized System Prompts
+- All agent prompts defined in `llm/prompts.py`
+- Shared preamble injected into every agent with `{memory}` placeholder
+- `build_system_prompt(agent_prompt, memory)` combines preamble + memory + agent-specific prompt
+- Keeps prompts maintainable in one place
+
+### 9. Per-Agent Memory with Token Budgets
+- Each agent has its own `MemoryManager` instance with a configurable `max_tokens` budget
+- Coding agent uses `MEMORY.md`, backlog agent uses `backlog_memory.md`
+- Compression prompt instructs Claude to stay within the token budget
+- `is_over_budget()` check prevents unbounded memory growth
+- Default budget: 2000 tokens (~8000 chars)
 
 ---
 

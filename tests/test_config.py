@@ -23,6 +23,8 @@ def test_settings_defaults():
     assert settings.sambot_log_level == "INFO"
     assert settings.redis_url == "redis://localhost:6379/0"
     assert settings.slack_progress_channel == "sambot-progress"
+    assert settings.slack_questions_channel == "sambot-questions"
+    assert settings.slack_backlog_channel == "sambot-backlog"
 
 
 def test_settings_agent_defaults():
@@ -33,6 +35,7 @@ def test_settings_agent_defaults():
     assert settings.sambot_max_agent_passes == 5
     assert settings.sambot_question_timeout_minutes == 30
     assert settings.sambot_base_branch == "develop"
+    assert settings.sambot_memory_max_tokens == 2000
 
 
 def test_settings_custom_agent_values(monkeypatch):
