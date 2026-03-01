@@ -9,6 +9,7 @@ services:
       - redis
     volumes:
       - workspaces:/tmp/sambot-workspaces
+      - ./data:/data/sambot
     restart: unless-stopped
 
   worker:
@@ -20,6 +21,7 @@ services:
       - redis
     volumes:
       - workspaces:/tmp/sambot-workspaces
+      - ./data:/data/sambot
     restart: unless-stopped
 
   redis:

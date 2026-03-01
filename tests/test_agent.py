@@ -377,3 +377,83 @@ def test_all_agent_prompts_exist():
     assert hasattr(prompts, "STORY_REFINEMENT_SYSTEM")
     assert hasattr(prompts, "PR_DESCRIPTION_SYSTEM")
     assert hasattr(prompts, "MEMORY_COMPRESSION_SYSTEM")
+
+
+# ---------- BacklogAgent intent classification tests ----------
+
+
+def test_backlog_classify_intent_create():
+    """classify_intent returns 'create' for confirmation messages."""
+    from unittest.mock import MagicMock
+
+    from sambot.agent.backlog import BacklogAgent
+
+    llm = MagicMock()
+    llm.complete_raw.return_value = "CREATE"
+    settings = MagicMock()
+    settings.sambot_memory_max_tokens = 2000
+    settings.backlog_memory_path = "/tmp/test_backlog_memory.md"
+
+    agent = BacklogAgent(llm_client=llm, settings=settings, memory_path=Path("/tmp/test_bl.md"))
+    intent = agent.classify_intent("Let's create the ticket.", conversation_context="prior messages")
+    assert intent == "create"
+    llm.complete_raw.assert_called_once()
+
+
+def test_backlog_classify_intent_refine():
+    """classify_intent returns 'refine' for informational messages."""
+    from unittest.mock import MagicMock
+
+    from sambot.agent.backlog import BacklogAgent
+
+    llm = MagicMock()
+    llm.complete_raw.return_value = "REFINE"
+    settings = MagicMock()
+    settings.sambot_memory_max_tokens = 2000
+    settings.backlog_memory_path = "/tmp/test_backlog_memory.md"
+
+    agent = BacklogAgent(llm_client=llm, settings=settings, memory_path=Path("/tmp/test_bl.md"))
+    intent = agent.classify_intent("Actually, we also need dark mode support.")
+    assert intent == "refine"
+
+
+def test_backlog_create_backlog_item():
+    """create_backlog_item creates a draft issue on the project board."""
+    from unittest.mock import MagicMock, patch
+
+    from sambot.agent.backlog import BacklogAgent
+
+    llm = MagicMock()
+    settings = MagicMock()
+    settings.sambot_memory_max_tokens = 2000
+    settings.backlog_memory_path = "/tmp/test_backlog_memory.md"
+    settings.resolved_project_owner = "test-owner"
+    settings.github_project_number = 1
+
+    agent = BacklogAgent(llm_client=llm, settings=settings, memory_path=Path("/tmp/test_bl.md"))
+
+    story = {
+        "title": "Set up local dev environment",
+        "description": "Clone the repo and build it.",
+        "acceptance_criteria": ["Repo cloned", "Build succeeds"],
+        "labels": ["chore"],
+    }
+
+    # Mock GraphQL responses: first for project lookup, second for draft creation
+    graphql_responses = [
+        {"user": {"projectV2": {"id": "PVT_abc123"}}},
+        {"addProjectV2DraftIssue": {"projectItem": {"id": "PVTI_item456"}}},
+    ]
+
+    with patch("sambot.agent.backlog.BacklogAgent.learn"):
+        with patch("sambot.github.client.GitHubClient") as MockGH:
+            mock_gh_instance = MagicMock()
+            mock_gh_instance.graphql_sync.side_effect = graphql_responses
+            MockGH.return_value = mock_gh_instance
+
+            result = agent.create_backlog_item(story)
+
+    assert result["title"] == "Set up local dev environment"
+    assert "projects/1" in result["url"]
+    assert result["item_id"] == "PVTI_item456"
+    assert mock_gh_instance.graphql_sync.call_count == 2

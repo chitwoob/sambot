@@ -50,6 +50,24 @@ class GitHubClient:
                 raise RuntimeError(f"GraphQL errors: {data['errors']}")
             return data["data"]
 
+    def graphql_sync(self, query: str, variables: dict | None = None) -> dict:
+        """Execute a GraphQL query synchronously."""
+        with httpx.Client() as client:
+            response = client.post(
+                self.GRAPHQL_URL,
+                json={"query": query, "variables": variables or {}},
+                headers={
+                    "Authorization": f"Bearer {self._token}",
+                    "Content-Type": "application/json",
+                },
+                timeout=30.0,
+            )
+            response.raise_for_status()
+            data = response.json()
+            if "errors" in data:
+                raise RuntimeError(f"GraphQL errors: {data['errors']}")
+            return data["data"]
+
     def close(self) -> None:
         """Clean up resources."""
         self.rest.close()

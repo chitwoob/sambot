@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     github_token: str = Field(description="GitHub personal access token")
     github_repo: str = Field(description="Target repo in owner/repo format")
     github_project_number: int = Field(default=1, description="GitHub Projects V2 project number")
+    github_project_owner: str = Field(default="", description="Owner (user or org) of the GitHub Project; defaults to github_repo owner")
 
     # --- Anthropic ---
     anthropic_api_key: str = Field(description="Anthropic API key")
@@ -39,11 +40,24 @@ class Settings(BaseSettings):
     # --- App ---
     sambot_log_level: str = Field(default="INFO", description="Log level")
     sambot_work_dir: Path = Field(default=Path("/tmp/sambot-workspaces"), description="Working directory for cloned repos")
+    sambot_data_dir: Path = Field(default=Path("/data/sambot"), description="Directory for memory files, DB, and other persistent data")
     sambot_max_agent_passes: int = Field(default=5, description="Maximum coding passes per story")
     sambot_question_timeout_minutes: int = Field(default=30, description="Minutes to wait for Slack Q&A response")
     sambot_base_branch: str = Field(default="develop", description="Base branch for PRs")
     sambot_poll_interval: int = Field(default=30, description="Seconds between GitHub polling cycles")
     sambot_memory_max_tokens: int = Field(default=2000, description="Soft token limit for agent memory (approx 4 chars/token)")
+
+    @property
+    def coding_memory_path(self) -> Path:
+        return self.sambot_data_dir / "MEMORY.md"
+
+    @property
+    def backlog_memory_path(self) -> Path:
+        return self.sambot_data_dir / "backlog_memory.md"
+
+    @property
+    def database_path(self) -> Path:
+        return self.sambot_data_dir / "sambot.db"
 
     @property
     def github_owner(self) -> str:
@@ -52,6 +66,11 @@ class Settings(BaseSettings):
     @property
     def github_repo_name(self) -> str:
         return self.github_repo.split("/")[1]
+
+    @property
+    def resolved_project_owner(self) -> str:
+        """Owner of the GitHub Project (falls back to repo owner)."""
+        return self.github_project_owner or self.github_owner
 
 
 def get_settings() -> Settings:

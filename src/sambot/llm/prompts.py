@@ -76,9 +76,22 @@ team discusses features, bugs, and improvements.
   1. A concise **title**
   2. A **description** with context and motivation
   3. **Acceptance criteria** (testable bullet points)
-  4. **Labels** (feature, bug, improvement, etc.)
-- Create GitHub issues when a story is ready.
+  4. **Labels** (feature, bug, improvement, chore, etc.)
 - Keep track of project context so stories are consistent.
+
+## Approval Workflow (CRITICAL)
+You NEVER create a ticket on your own.  Every story must be explicitly \
+approved by the team before it is submitted to GitHub.
+
+1. **Draft** — Present the story for review.  Always end your response \
+with the follow-up questions section (or "none") so the team knows \
+the draft is ready for feedback.
+2. **Iterate** — If the team provides answers, corrections, or new \
+details, update the draft and present it again for review.
+3. **Wait for approval** — Only when the team confirms the story is \
+good (e.g. "create it", "looks good", "approved", "ship it") should \
+the ticket be created.  Do NOT interpret answering your questions or \
+providing more info as approval.
 
 ## Rules
 - Be concise — stories should be specific and actionable.
@@ -86,6 +99,7 @@ team discusses features, bugs, and improvements.
 - Ask the team for clarification rather than inventing requirements.
 - One story per issue — break large requests into smaller stories.
 - Use the project's labelling conventions from memory.
+- NEVER create the GitHub issue until explicit approval is given.
 """
 
 # ---------------------------------------------------------------------------

@@ -75,6 +75,63 @@ All config is via environment variables (see [.env.example](.env.example)):
 | `SAMBOT_BASE_BRANCH` | Base branch for PRs | `develop` |
 | `SAMBOT_MEMORY_MAX_TOKENS` | Token budget per agent memory | `2000` |
 
+### GitHub Token (Fine-Grained PAT)
+
+Create a **fine-grained personal access token** scoped to your target repository with these permissions:
+
+**Repository permissions:**
+
+| Permission | Access | Used For |
+|------------|--------|----------|
+| Contents | Read & Write | Create branches, push commits |
+| Issues | Read & Write | Read issue details, post comments |
+| Pull requests | Read & Write | Create PRs |
+| Metadata | Read-only | Required by default |
+
+**Organization permissions** (or Account permissions for personal projects):
+
+| Permission | Access | Used For |
+|------------|--------|----------|
+| Projects | Read & Write | Poll project board, update item status |
+
+> **Note:** Projects V2 permissions are **not** under Repository permissions — they are under Organization permissions (for org projects) or Account permissions (for user-owned projects).
+
+### Slack App Setup
+
+SamBot uses **Socket Mode** so no public URL is needed.
+
+1. **Create a Slack app** at [api.slack.com/apps](https://api.slack.com/apps) → *Create New App* → *From scratch*
+2. **Enable Socket Mode:**
+   - *Settings → Socket Mode* → Toggle on
+   - Generate an **App-Level Token** with the `connections:write` scope → copy it as `SLACK_APP_TOKEN` (starts with `xapp-`)
+3. **Add Bot Token Scopes** under *OAuth & Permissions → Scopes → Bot Token Scopes*:
+   - `chat:write` — Post messages to channels
+   - `commands` — Handle `/sambot` slash commands
+   - `channels:history` — Read messages in public channels (for Q&A replies)
+   - `channels:read` — List and find channels
+4. **Install the app** to your workspace under *OAuth & Permissions → Install to Workspace*
+   - Copy the **Bot User OAuth Token** as `SLACK_BOT_TOKEN` (starts with `xoxb-`)
+5. **Copy the Signing Secret** from *Settings → Basic Information → App Credentials* as `SLACK_SIGNING_SECRET`
+6. **Create slash command** under *Features → Slash Commands*:
+   - Command: `/sambot`
+   - Description: `SamBot AI assistant`
+   - Usage hint: `help | status | start <issue>`
+7. **Create three Slack channels** and invite the bot to each:
+   - `#sambot-progress` — Real-time status updates
+   - `#sambot-questions` — Agent asks humans clarifying questions
+   - `#sambot-backlog` — Build & refine stories interactively
+
+**Environment variables summary:**
+
+```bash
+SLACK_BOT_TOKEN=xoxb-...        # Bot User OAuth Token
+SLACK_APP_TOKEN=xapp-...        # App-Level Token (Socket Mode)
+SLACK_SIGNING_SECRET=...        # From Basic Information
+SLACK_PROGRESS_CHANNEL=sambot-progress
+SLACK_QUESTIONS_CHANNEL=sambot-questions
+SLACK_BACKLOG_CHANNEL=sambot-backlog
+```
+
 ## System Prompts
 
 All agent prompts live in a single file: `src/sambot/llm/prompts.py`. Every LLM call goes through `build_system_prompt()` which injects a shared preamble + project memory automatically.

@@ -6,10 +6,12 @@ import asyncio
 import contextlib
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import structlog
 from fastapi import FastAPI
+from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from sambot.config import get_settings
 from sambot.db import init_db
@@ -21,6 +23,44 @@ logger = structlog.get_logger()
 
 # Module-level reference so other parts of the app can stop it if needed
 _poller_task: asyncio.Task | None = None
+
+
+def _default_coding_memory(settings) -> str:
+    """Generate a default coding agent memory file."""
+    return (
+        "# SamBot — Coding Agent Memory\n\n"
+        "> Persistent context for the AI coding agent.\n"
+        "> Updated automatically as stories are completed.\n\n"
+        "---\n\n"
+        "## Project Info\n\n"
+        f"**Repository:** {settings.github_repo}\n"
+        f"**Base Branch:** {settings.sambot_base_branch}\n"
+        f"**Max Agent Passes:** {settings.sambot_max_agent_passes}\n\n"
+        "---\n\n"
+        "## Architecture\n\n"
+        "_No facts recorded yet. This file will be updated as stories are completed._\n\n"
+        "## Conventions\n\n"
+        "_Will be populated after the first coding run._\n"
+    )
+
+
+def _default_backlog_memory(settings) -> str:
+    """Generate a default backlog agent memory file."""
+    return (
+        "# SamBot — Backlog Agent Memory\n\n"
+        "> Persistent context for the backlog/story-building agent.\n"
+        "> Updated as stories are refined and created.\n\n"
+        "---\n\n"
+        "## Project Info\n\n"
+        f"**Repository:** {settings.github_repo}\n\n"
+        "## Story Conventions\n\n"
+        "_No conventions recorded yet. Will be populated as stories are refined._\n\n"
+        "## Labels\n\n"
+        "- `feature` — New functionality\n"
+        "- `bug` — Defect fix\n"
+        "- `improvement` — Enhancement to existing code\n"
+        "- `chore` — Maintenance / tooling\n"
+    )
 
 
 @asynccontextmanager
@@ -40,12 +80,29 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     logger.info("sambot.starting", repo=settings.github_repo)
 
-    # Initialize database
-    init_db()
-    logger.info("sambot.db_initialized")
-
-    # Ensure work directory exists
+    # Ensure data and work directories exist
+    settings.sambot_data_dir.mkdir(parents=True, exist_ok=True)
     settings.sambot_work_dir.mkdir(parents=True, exist_ok=True)
+
+    # Seed coding memory — copy bundled file or generate a default
+    if not settings.coding_memory_path.exists():
+        bundled = Path("/app/MEMORY.md")
+        if bundled.exists():
+            import shutil
+            shutil.copy2(bundled, settings.coding_memory_path)
+            logger.info("sambot.memory_seeded", source="bundled", path=str(settings.coding_memory_path))
+        else:
+            settings.coding_memory_path.write_text(_default_coding_memory(settings))
+            logger.info("sambot.memory_created", path=str(settings.coding_memory_path))
+
+    # Seed backlog memory — generate a default if missing
+    if not settings.backlog_memory_path.exists():
+        settings.backlog_memory_path.write_text(_default_backlog_memory(settings))
+        logger.info("sambot.backlog_memory_created", path=str(settings.backlog_memory_path))
+
+    # Initialize database
+    init_db(str(settings.database_path))
+    logger.info("sambot.db_initialized", path=str(settings.database_path))
 
     # Start GitHub poller as a background task
     from sambot.github.client import GitHubClient
@@ -55,7 +112,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     github = GitHubClient(settings)
     projects = ProjectsClient(
         github,
-        owner=settings.github_owner,
+        owner=settings.resolved_project_owner,
         repo=settings.github_repo_name,
         project_number=settings.github_project_number,
     )
@@ -72,9 +129,26 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     _poller_task = asyncio.create_task(poller.start())
     logger.info("sambot.poller_started", interval=settings.sambot_poll_interval)
 
+    # Start Slack app in socket mode (runs in a background thread)
+    from sambot.slack.app import create_slack_app, start_socket_mode
+
+    slack_app = create_slack_app(settings)
+    slack_handler = None
+    if slack_app:
+        from sambot.slack.backlog_handler import register_backlog_handler
+
+        register_backlog_handler(slack_app, settings)
+        slack_handler = SocketModeHandler(slack_app, settings.slack_app_token)
+        slack_handler.connect()  # non-blocking — runs in a daemon thread
+        logger.info("sambot.slack_started")
+    else:
+        logger.warning("sambot.slack_disabled")
+
     yield
 
     # Shutdown
+    if slack_handler:
+        slack_handler.close()
     poller.stop()
     if _poller_task:
         _poller_task.cancel()

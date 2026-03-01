@@ -12,10 +12,10 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
-# GraphQL query to fetch project items
+# GraphQL query to fetch project items (user-level project)
 QUERY_PROJECT_ITEMS = """
-query($owner: String!, $repo: String!, $projectNumber: Int!, $first: Int!) {
-  repository(owner: $owner, name: $repo) {
+query($login: String!, $projectNumber: Int!, $first: Int!) {
+  user(login: $login) {
     projectV2(number: $projectNumber) {
       id
       title
@@ -74,8 +74,8 @@ mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
 
 # Query to get project field metadata (for looking up Status field ID and option IDs)
 QUERY_PROJECT_FIELDS = """
-query($owner: String!, $repo: String!, $projectNumber: Int!) {
-  repository(owner: $owner, name: $repo) {
+query($login: String!, $projectNumber: Int!) {
+  user(login: $login) {
     projectV2(number: $projectNumber) {
       id
       fields(first: 20) {
@@ -126,14 +126,13 @@ class ProjectsClient:
         data = await self._github.graphql(
             QUERY_PROJECT_ITEMS,
             {
-                "owner": self._owner,
-                "repo": self._repo,
+                "login": self._owner,
                 "projectNumber": self._project_number,
                 "first": first,
             },
         )
 
-        project = data["repository"]["projectV2"]
+        project = data["user"]["projectV2"]
         self._project_id = project["id"]
         items = []
 
@@ -168,13 +167,12 @@ class ProjectsClient:
         data = await self._github.graphql(
             QUERY_PROJECT_FIELDS,
             {
-                "owner": self._owner,
-                "repo": self._repo,
+                "login": self._owner,
                 "projectNumber": self._project_number,
             },
         )
 
-        project = data["repository"]["projectV2"]
+        project = data["user"]["projectV2"]
         self._project_id = project["id"]
 
         for field in project["fields"]["nodes"]:

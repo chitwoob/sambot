@@ -28,6 +28,15 @@ logger = structlog.get_logger()
 DEFAULT_BACKLOG_MEMORY_PATH = Path("backlog_memory.md")
 
 
+def _get_backlog_memory_path() -> Path:
+    """Return the backlog agent memory path from settings, or fallback."""
+    try:
+        from sambot.config import get_settings
+        return get_settings().backlog_memory_path
+    except Exception:
+        return DEFAULT_BACKLOG_MEMORY_PATH
+
+
 class BacklogAgent:
     """Builds well-structured stories from Slack conversations.
 
@@ -52,7 +61,7 @@ class BacklogAgent:
         self._llm = llm_client
         self._settings = settings
         self._memory = MemoryManager(
-            memory_path=memory_path or DEFAULT_BACKLOG_MEMORY_PATH,
+            memory_path=memory_path or _get_backlog_memory_path(),
             max_tokens=settings.sambot_memory_max_tokens,
         )
 
@@ -106,6 +115,108 @@ class BacklogAgent:
         )
         response = self._llm.complete_raw(prompt, system=system, max_tokens=4096)
         return self._parse_story_response(response)
+
+    def classify_intent(self, message: str, conversation_context: str = "") -> str:
+        """Classify whether the user wants to create the ticket or refine.
+
+        Returns:
+            ``'create'`` if the user is confirming the story is ready,
+            ``'refine'`` if they are providing more information.
+        """
+        prompt = (
+            "You are classifying the intent of a message in a backlog "
+            "refinement thread.\n\n"
+            f"Conversation so far:\n{conversation_context}\n\n"
+            f"Latest message from the user:\n{message}\n\n"
+            "Does the user want to:\n"
+            "A) CREATE - Submit/create the ticket now "
+            "(they are done refining, said something like 'create it', "
+            "'let's do it', 'looks good', etc.)\n"
+            "B) REFINE - Provide more information, answer questions, "
+            "or request changes to the draft\n\n"
+            "Respond with exactly one word: CREATE or REFINE"
+        )
+        response = self._llm.complete_raw(prompt, max_tokens=10, temperature=0.0)
+        intent = "create" if "CREATE" in response.strip().upper() else "refine"
+        logger.info("backlog.intent_classified", intent=intent, message=message[:60])
+        return intent
+
+    def create_backlog_item(self, story: dict) -> dict:
+        """Create a draft issue on the GitHub Project board.
+
+        Uses the ``addProjectV2DraftIssue`` GraphQL mutation so the
+        item lives only on the project board — no repo Issue is created.
+
+        Returns:
+            dict with ``title``, ``url`` (project board link), and
+            ``item_id`` (project item node ID).
+        """
+        from sambot.github.client import GitHubClient
+
+        gh = GitHubClient(self._settings)
+
+        # Build body
+        body_parts: list[str] = []
+        if story.get("description"):
+            body_parts.append(story["description"])
+        if story.get("acceptance_criteria"):
+            body_parts.append("\n## Acceptance Criteria")
+            for ac in story["acceptance_criteria"]:
+                body_parts.append(f"- [ ] {ac}")
+        if story.get("labels"):
+            body_parts.append(f"\n**Labels:** {', '.join(story['labels'])}")
+        body = "\n".join(body_parts)
+
+        title = story.get("title", "Untitled")
+
+        # Look up project node ID
+        project_query = """
+        query($login: String!, $projectNumber: Int!) {
+          user(login: $login) {
+            projectV2(number: $projectNumber) { id }
+          }
+        }
+        """
+        data = gh.graphql_sync(project_query, {
+            "login": self._settings.resolved_project_owner,
+            "projectNumber": self._settings.github_project_number,
+        })
+        project_id = data["user"]["projectV2"]["id"]
+
+        # Create a draft issue on the project board
+        mutation = """
+        mutation($projectId: ID!, $title: String!, $body: String!) {
+          addProjectV2DraftIssue(
+            input: {projectId: $projectId, title: $title, body: $body}
+          ) {
+            projectItem { id }
+          }
+        }
+        """
+        result = gh.graphql_sync(mutation, {
+            "projectId": project_id,
+            "title": title,
+            "body": body,
+        })
+        item_id = result["addProjectV2DraftIssue"]["projectItem"]["id"]
+        kind = _item_kind(story)
+        logger.info("backlog.created", kind=kind, title=title, item_id=item_id)
+
+        # Build project board URL
+        owner = self._settings.resolved_project_owner
+        project_num = self._settings.github_project_number
+        project_url = f"https://github.com/users/{owner}/projects/{project_num}"
+
+        # Learn from the creation
+        kind = _item_kind(story)
+        self.learn(f"Created {kind.lower()}: {title}. Labels: {', '.join(story.get('labels', []))}.")
+
+        gh.close()
+        return {
+            "title": title,
+            "url": project_url,
+            "item_id": item_id,
+        }
 
     def learn(self, new_facts: str) -> None:
         """Compress new facts into the backlog agent's memory.
@@ -220,3 +331,22 @@ def _flush(result: dict, section: str | None, buffer: list[str]) -> None:
             text = line.strip().lstrip("- ").strip()
             if text:
                 result[section].append(text)
+
+
+_LABEL_TO_KIND = {
+    "bug": "Bug",
+    "feature": "Story",
+    "story": "Story",
+    "improvement": "Story",
+    "chore": "Task",
+    "task": "Task",
+}
+
+
+def _item_kind(story: dict) -> str:
+    """Derive a human-friendly type (Story, Task, Bug) from labels."""
+    for label in story.get("labels", []):
+        kind = _LABEL_TO_KIND.get(label.lower())
+        if kind:
+            return kind
+    return "Story"

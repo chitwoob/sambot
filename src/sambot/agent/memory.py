@@ -14,8 +14,17 @@ import structlog
 
 logger = structlog.get_logger()
 
-# Default memory file path (relative to project root, not workspace)
+# Default memory file path — overridden by settings at runtime
 DEFAULT_MEMORY_PATH = Path("MEMORY.md")
+
+
+def get_default_memory_path() -> Path:
+    """Return the coding agent memory path from settings, or fallback."""
+    try:
+        from sambot.config import get_settings
+        return get_settings().coding_memory_path
+    except Exception:
+        return DEFAULT_MEMORY_PATH
 
 # Approximate chars-per-token for budget estimation (conservative)
 CHARS_PER_TOKEN = 4
@@ -33,7 +42,7 @@ class MemoryManager:
         memory_path: Path | None = None,
         max_tokens: int = 2000,
     ) -> None:
-        self._memory_path = memory_path or DEFAULT_MEMORY_PATH
+        self._memory_path = memory_path or get_default_memory_path()
         self._max_tokens = max_tokens
 
     @property
