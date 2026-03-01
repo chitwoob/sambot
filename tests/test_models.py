@@ -46,3 +46,37 @@ def test_job_status_values():
     expected = {"pending", "running", "asking", "success", "failed", "cancelled"}
     actual = {s.value for s in JobStatus}
     assert actual == expected
+
+
+def test_docker_permission_defaults():
+    """DockerPermission model has correct defaults."""
+    from sambot.models import DockerPermission
+
+    perm = DockerPermission(
+        repo="owner/repo",
+        file_path="Dockerfile",
+    )
+    assert perm.repo == "owner/repo"
+    assert perm.file_path == "Dockerfile"
+    assert perm.file_hash == ""
+    assert perm.approved is False
+    assert perm.approved_by == ""
+    assert perm.approved_at is None
+
+
+def test_docker_permission_approved():
+    """DockerPermission tracks approval state."""
+    from datetime import UTC, datetime
+    from sambot.models import DockerPermission
+
+    now = datetime.now(UTC)
+    perm = DockerPermission(
+        repo="owner/repo",
+        file_path="docker-compose.yml",
+        approved=True,
+        approved_by="U12345",
+        approved_at=now,
+    )
+    assert perm.approved is True
+    assert perm.approved_by == "U12345"
+    assert perm.approved_at == now

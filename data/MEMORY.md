@@ -7,9 +7,9 @@
 
 ## Project State
 
-**Current Phase:** Phase 2 — Custom Agent Core + 3-Channel Architecture  
-**Last Updated:** 2026-02-26  
-**Status:** Multi-channel Slack, backlog agent, centralized prompts, per-agent memory
+**Current Phase:** Phase 3 — Coder Bot Wiring & Full Pipeline  
+**Last Updated:** 2026-03-01  
+**Status:** Implementing coder bot: ready-scan, Docker gen, permission system, branch mgmt, PR merge
 
 ---
 
@@ -52,19 +52,23 @@ SamBot is a Python-based SDLC automation tool that:
 
 1. **Config via Pydantic Settings** — All config from env vars, typed and validated
 2. **Background jobs via RQ** — Agent runs are long; FastAPI stays responsive
-3. **Custom agent with tool use** — Claude calls tools: read_file, write_file, list_dir, run_tests, ask_question
+3. **Custom agent with tool use** — Claude calls tools: read_file, write_file, list_dir, run_tests, ask_question, run_command, search_files
 4. **Memory-aware LLM** — Every call includes per-agent memory via `build_system_prompt()`
 5. **Multi-pass loop** — Agent iterates: code → test → fix → repeat (max 5 passes)
 6. **Slack Q&A** — Agent posts questions to `#sambot-questions`, waits for human answers
 7. **Test gating** — PR only created after all tests pass; PRs include tests
-8. **Branch strategy** — develop → feature/<num>-slug or bug/<num>-slug
-9. **Memory compression** — After each job, new facts compressed within token budget
-10. **GraphQL for Projects V2** — Required by GitHub (no REST for v2 projects)
-11. **Slack Socket Mode** — No public URL needed for Slack events
-12. **Polling over webhooks** — Runs behind NAT/firewall; no inbound connectivity needed
-13. **3 Slack channels** — Backlog (story building), Questions (agent Q&A), Progress (status)
-14. **Centralized system prompts** — All prompts in `llm/prompts.py` with shared preamble + `{memory}` injection
-15. **Per-agent memory** — Each agent has its own `MemoryManager` with configurable `max_tokens` budget
+8. **Branch strategy** — develop → feature/<num>-slug or bug/<num>-slug; NEVER push to develop or main directly
+9. **Ready-scan poller** — Polls for items in "Ready" status, picks top-to-bottom (priority order), moves to In Progress
+10. **Docker permission system** — Coder generates Docker/compose for unknown stacks, asks permission in Slack before running; permissions persist in DB
+11. **PR merge via rebase** — On approval, merge feature→develop via rebase; complex merges get re-review
+12. **Branch stacking** — If multiple stories in review, coder can stack feature branches
+13. **Memory compression** — After each job, new facts compressed within token budget
+14. **GraphQL for Projects V2** — Required by GitHub (no REST for v2 projects)
+15. **Slack Socket Mode** — No public URL needed for Slack events
+16. **Polling over webhooks** — Runs behind NAT/firewall; no inbound connectivity needed
+17. **3 Slack channels** — Backlog (story building), Questions (agent Q&A), Progress (status)
+18. **Centralized system prompts** — All prompts in `llm/prompts.py` with shared preamble + `{memory}` injection
+19. **Per-agent memory** — Each agent has its own `MemoryManager` with configurable `max_tokens` budget
 
 ---
 
@@ -135,6 +139,23 @@ src/sambot/
 | 2026-02-26 | 3 Slack channels                            | Separation of concerns: backlog, Q&A, progress |
 | 2026-02-26 | Centralized system prompts                  | One file for all agent prompts, shared preamble |
 | 2026-02-26 | Per-agent memory with token budgets         | Prevent unbounded memory growth, control costs |
+| 2026-03-01 | Ready-scan instead of In-Progress trigger   | Bot picks work from Ready queue by priority    |
+| 2026-03-01 | Docker permission system                    | Safety — bot asks before running new Docker    |
+| 2026-03-01 | Never push to develop/main directly         | All changes via feature branches + PR          |
+| 2026-03-01 | Rebase merge strategy                       | Clean history, complex merges get re-review    |
+| 2026-03-01 | Language-agnostic coder                     | Scan repo to detect stack, generate Docker     |
+| 2026-03-01 | Persistent Docker permissions in DB         | Don't re-ask for already-approved Docker files |
+
+---
+
+## Recent Completions
+
+**Story #38: Set up local development environment** (Completed)
+- Branch: `feature/38-set-up-local-development-environment`, PR: #39
+- Stack detected: Node.js/TypeScript with NestJS
+- Files created: README.md, .env.example, init.sql, Docker configs, health endpoints, setup scripts, validation tests
+- Passes: 1 (completed on first attempt)
+- Key learnings: Agent successfully detected TypeScript/NestJS stack, generated appropriate Docker setup, created comprehensive dev environment with health checks and validation
 
 ---
 
@@ -143,6 +164,10 @@ src/sambot/
 - The full plan is in `PLAN.md` — read it for the phased roadmap
 - When adding a new module, update the File Map above
 - When making an architectural decision, add it to the Decisions Log
-- Keep this file under 500 lines — archive old sections if needed
+- Keep this file under 2000 tokens — archive old sections if needed
 - All LLM calls MUST include memory context (see llm/client.py)
 - Agent tools are defined in agent/tools.py — add new tools there
+- Coder NEVER updates develop or main branches — feature branches only
+- Docker permissions tracked in `DockerPermission` SQLModel table
+- Poller scans for "Ready" status items, not "In Progress"
+- Agent can detect and work with multiple tech stacks (Python, TypeScript/NestJS confirmed)

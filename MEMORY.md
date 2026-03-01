@@ -7,9 +7,9 @@
 
 ## Project State
 
-**Current Phase:** Phase 2 — Custom Agent Core + 3-Channel Architecture  
-**Last Updated:** 2026-02-26  
-**Status:** Multi-channel Slack, backlog agent, centralized prompts, per-agent memory
+**Current Phase:** Phase 3 — Coder Bot Wiring & Full Pipeline  
+**Last Updated:** 2026-03-01  
+**Status:** Implementing coder bot: ready-scan, Docker gen, permission system, branch mgmt, PR merge
 
 ---
 
@@ -52,12 +52,16 @@ SamBot is a Python-based SDLC automation tool that:
 
 1. **Config via Pydantic Settings** — All config from env vars, typed and validated
 2. **Background jobs via RQ** — Agent runs are long; FastAPI stays responsive
-3. **Custom agent with tool use** — Claude calls tools: read_file, write_file, list_dir, run_tests, ask_question
+3. **Custom agent with tool use** — Claude calls tools: read_file, write_file, list_dir, run_tests, ask_question, run_command, search_files
 4. **Memory-aware LLM** — Every call includes per-agent memory via `build_system_prompt()`
 5. **Multi-pass loop** — Agent iterates: code → test → fix → repeat (max 5 passes)
 6. **Slack Q&A** — Agent posts questions to `#sambot-questions`, waits for human answers
 7. **Test gating** — PR only created after all tests pass; PRs include tests
-8. **Branch strategy** — develop → feature/<num>-slug or bug/<num>-slug
+8. **Branch strategy** — develop → feature/<num>-slug or bug/<num>-slug; NEVER push to develop or main directly
+9. **Ready-scan poller** — Polls for items in "Ready" status, picks top-to-bottom (priority order), moves to In Progress
+10. **Docker permission system** — Coder generates Docker/compose for unknown stacks, asks permission in Slack before running; permissions persist in DB
+11. **PR merge via rebase** — On approval, merge feature→develop via rebase; complex merges get re-review
+12. **Branch stacking** — If multiple stories in review, coder can stack feature branches
 9. **Memory compression** — After each job, new facts compressed within token budget
 10. **GraphQL for Projects V2** — Required by GitHub (no REST for v2 projects)
 11. **Slack Socket Mode** — No public URL needed for Slack events
@@ -135,6 +139,12 @@ src/sambot/
 | 2026-02-26 | 3 Slack channels                            | Separation of concerns: backlog, Q&A, progress |
 | 2026-02-26 | Centralized system prompts                  | One file for all agent prompts, shared preamble |
 | 2026-02-26 | Per-agent memory with token budgets         | Prevent unbounded memory growth, control costs |
+| 2026-03-01 | Ready-scan instead of In-Progress trigger   | Bot picks work from Ready queue by priority    |
+| 2026-03-01 | Docker permission system                    | Safety — bot asks before running new Docker    |
+| 2026-03-01 | Never push to develop/main directly         | All changes via feature branches + PR          |
+| 2026-03-01 | Rebase merge strategy                       | Clean history, complex merges get re-review    |
+| 2026-03-01 | Language-agnostic coder                     | Scan repo to detect stack, generate Docker     |
+| 2026-03-01 | Persistent Docker permissions in DB         | Don't re-ask for already-approved Docker files |
 
 ---
 
@@ -146,3 +156,6 @@ src/sambot/
 - Keep this file under 500 lines — archive old sections if needed
 - All LLM calls MUST include memory context (see llm/client.py)
 - Agent tools are defined in agent/tools.py — add new tools there
+- Coder NEVER updates develop or main branches — feature branches only
+- Docker permissions tracked in `DockerPermission` SQLModel table
+- Poller scans for "Ready" status items, not "In Progress"

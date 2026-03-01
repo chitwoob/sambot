@@ -86,6 +86,9 @@ class SlackQuestionHandler:
             )
 
             question_ts = result["ts"]
+            # Use the channel ID from the response (not the name we passed in),
+            # because conversations_replies requires a channel ID.
+            self._resolved_channel = result["channel"]
             if not self._thread_ts:
                 self._thread_ts = question_ts
 
@@ -122,16 +125,21 @@ class SlackQuestionHandler:
         """Poll for a reply in the thread. Returns the reply text or None on timeout."""
         deadline = time.time() + (self._timeout_minutes * 60)
         poll_interval = 5  # seconds
+        # Use resolved channel ID (from postMessage response) for reads
+        read_channel = getattr(self, "_resolved_channel", None) or self._channel
+        consecutive_errors = 0
+        max_consecutive_errors = 5
 
         while time.time() < deadline:
             try:
                 # Check for new replies in the thread
                 replies = self._app.client.conversations_replies(
-                    channel=self._channel,
+                    channel=read_channel,
                     ts=self._thread_ts or question_ts,
                     oldest=question_ts,
                 )
 
+                consecutive_errors = 0  # reset on success
                 messages = replies.get("messages", [])
                 # Skip the first message (our question) and bot messages
                 for msg in messages[1:]:
@@ -139,7 +147,15 @@ class SlackQuestionHandler:
                         return msg.get("text", "")
 
             except Exception as e:
+                consecutive_errors += 1
                 logger.warning("slack_qa.poll_error", error=str(e))
+                if consecutive_errors >= max_consecutive_errors:
+                    logger.error(
+                        "slack_qa.poll_giving_up",
+                        channel=read_channel,
+                        errors=consecutive_errors,
+                    )
+                    return None
 
             time.sleep(poll_interval)
 

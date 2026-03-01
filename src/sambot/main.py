@@ -63,6 +63,99 @@ def _default_backlog_memory(settings) -> str:
     )
 
 
+async def _recover_interrupted_jobs(settings, projects) -> None:
+    """Recover items stuck in 'In progress' from a previous interrupted run.
+
+    On startup, fetch all project items and find ones in "In progress".
+    For each, check if there's an active RQ job for that issue.  If not,
+    move the item back to "Ready" so it gets picked up again.
+    """
+    try:
+        items = await projects.get_items()
+        in_progress = [i for i in items if i.status.lower() == "in progress"]
+
+        if not in_progress:
+            logger.info("recovery.none_needed")
+            return
+
+        # Check RQ for active jobs
+        from redis import Redis
+        from rq import Queue
+
+        redis_conn = Redis.from_url(settings.redis_url)
+        queue = Queue(connection=redis_conn)
+
+        # Collect issue numbers that have active (queued/started) RQ jobs
+        active_issues: set[int] = set()
+        for job in queue.jobs:
+            if job.func_name == "sambot.jobs.worker.process_story" and job.args:
+                active_issues.add(job.args[0])
+
+        # Also check the started job registry
+        started = queue.started_job_registry
+        for job_id in started.get_job_ids():
+            try:
+                from rq.job import Job
+                job = Job.fetch(job_id, connection=redis_conn)
+                if job.func_name == "sambot.jobs.worker.process_story" and job.args:
+                    active_issues.add(job.args[0])
+            except Exception:
+                pass  # job may have been cleaned up
+
+        for item in in_progress:
+            if item.issue_number in active_issues:
+                logger.info(
+                    "recovery.job_still_active",
+                    issue_number=item.issue_number,
+                    title=item.title,
+                )
+                continue
+
+            # No active job — move back to Ready
+            logger.info(
+                "recovery.moving_to_ready",
+                issue_number=item.issue_number,
+                title=item.title,
+            )
+            try:
+                await projects.update_status(item.item_id, "Ready")
+                logger.info(
+                    "recovery.recovered",
+                    issue_number=item.issue_number,
+                )
+            except Exception:
+                logger.exception(
+                    "recovery.move_failed",
+                    issue_number=item.issue_number,
+                )
+
+    except Exception:
+        logger.exception("recovery.error")
+
+
+def _reset_failed_job_records() -> None:
+    """Clear stale FAILED job records so the retry counter starts fresh.
+
+    Called once on startup — previous failures from earlier bot runs
+    should not count against the retry limit for the new session.
+    """
+    from sambot.db import get_session
+    from sambot.models import JobStatus, StoryJob
+    from sqlmodel import select
+
+    with get_session() as session:
+        stale = session.exec(
+            select(StoryJob).where(StoryJob.status == JobStatus.FAILED)
+        ).all()
+        if not stale:
+            return
+        for job in stale:
+            job.status = JobStatus.CANCELLED
+            session.add(job)
+        session.commit()
+        logger.info("recovery.reset_failed_jobs", count=len(stale))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     """Application startup and shutdown."""
@@ -104,6 +197,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     init_db(str(settings.database_path))
     logger.info("sambot.db_initialized", path=str(settings.database_path))
 
+    # Reset stale failure records so retry counter starts fresh
+    _reset_failed_job_records()
+
     # Start GitHub poller as a background task
     from sambot.github.client import GitHubClient
     from sambot.github.poller import GitHubPoller
@@ -117,15 +213,46 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         project_number=settings.github_project_number,
     )
 
-    def _on_trigger(item):
-        """Callback when a story moves to In Progress."""
-        logger.info("poller.dispatch", issue_number=item.issue_number, title=item.title)
-        # TODO Phase 3: enqueue process_story job via RQ
-        # from rq import Queue
-        # queue = Queue(connection=redis_conn)
-        # queue.enqueue(process_story, item.issue_number)
+    # Recover interrupted jobs — move orphaned "In progress" items back to Ready
+    await _recover_interrupted_jobs(settings, projects)
 
-    poller = GitHubPoller(settings, github, projects, on_trigger=_on_trigger)
+    def _on_trigger(item):
+        """Callback when a story is in Ready status — enqueue for processing."""
+        logger.info("poller.dispatch", issue_number=item.issue_number, title=item.title)
+        try:
+            from redis import Redis
+            from rq import Queue
+
+            redis_conn = Redis.from_url(settings.redis_url)
+            queue = Queue(connection=redis_conn)
+
+            from sambot.jobs.worker import process_story
+            queue.enqueue(process_story, item.issue_number, job_timeout="30m")
+            logger.info("poller.enqueued", issue_number=item.issue_number)
+        except Exception:
+            logger.exception("poller.enqueue_error", issue_number=item.issue_number)
+
+    def _on_pr_approved(pr_number):
+        """Callback when a PR is approved — enqueue merge job."""
+        logger.info("poller.pr_approved_dispatch", pr_number=pr_number)
+        try:
+            from redis import Redis
+            from rq import Queue
+
+            redis_conn = Redis.from_url(settings.redis_url)
+            queue = Queue(connection=redis_conn)
+
+            from sambot.jobs.worker import merge_approved_pr
+            queue.enqueue(merge_approved_pr, pr_number, job_timeout="10m")
+            logger.info("poller.merge_enqueued", pr_number=pr_number)
+        except Exception:
+            logger.exception("poller.merge_enqueue_error", pr_number=pr_number)
+
+    poller = GitHubPoller(
+        settings, github, projects,
+        on_trigger=_on_trigger,
+        on_pr_approved=_on_pr_approved,
+    )
     _poller_task = asyncio.create_task(poller.start())
     logger.info("sambot.poller_started", interval=settings.sambot_poll_interval)
 

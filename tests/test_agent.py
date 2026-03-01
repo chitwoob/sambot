@@ -107,11 +107,15 @@ def test_tool_executor_skips_hidden_and_pycache(tmp_path: Path):
 
 
 def test_tool_definitions_names():
-    """All 5 expected tools are defined."""
+    """All expected tools are defined."""
     from sambot.agent.tools import TOOL_DEFINITIONS
 
     names = {t["name"] for t in TOOL_DEFINITIONS}
-    assert names == {"read_file", "write_file", "list_directory", "run_tests", "ask_question"}
+    assert names == {
+        "read_file", "write_file", "list_directory", "run_tests",
+        "ask_question", "search_files", "grep_file", "run_command",
+        "request_docker_permission",
+    }
 
 
 def test_tool_definitions_have_schemas():
@@ -457,3 +461,123 @@ def test_backlog_create_backlog_item():
     assert "projects/1" in result["url"]
     assert result["item_id"] == "PVTI_item456"
     assert mock_gh_instance.graphql_sync.call_count == 2
+
+
+# ---------- New tool tests ----------
+
+
+def test_tool_executor_search_files(tmp_path: Path):
+    """ToolExecutor.search_files finds files by glob pattern."""
+    from sambot.agent.tools import ToolExecutor
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_text("print('hi')")
+    (tmp_path / "src" / "utils.py").write_text("pass")
+    (tmp_path / "README.md").write_text("# Readme")
+
+    executor = ToolExecutor(tmp_path)
+    result = executor.search_files("*.py")
+    assert result.success is True
+    assert "main.py" in result.output
+    assert "utils.py" in result.output
+    assert "README.md" not in result.output
+
+
+def test_tool_executor_search_files_no_match(tmp_path: Path):
+    """ToolExecutor.search_files returns message when nothing found."""
+    from sambot.agent.tools import ToolExecutor
+
+    executor = ToolExecutor(tmp_path)
+    result = executor.search_files("*.rs")
+    assert result.success is True
+    assert "no files" in result.output.lower()
+
+
+def test_tool_executor_grep_file(tmp_path: Path):
+    """ToolExecutor.grep_file searches for patterns inside files."""
+    from sambot.agent.tools import ToolExecutor
+
+    (tmp_path / "code.py").write_text("def hello():\n    return 'world'\n")
+    executor = ToolExecutor(tmp_path)
+    result = executor.grep_file("hello", ".")
+    assert result.success is True
+    assert "hello" in result.output
+
+
+def test_tool_executor_run_command(tmp_path: Path):
+    """ToolExecutor.run_command runs shell commands."""
+    from sambot.agent.tools import ToolExecutor
+
+    executor = ToolExecutor(tmp_path)
+    result = executor.run_command("echo 'sambot test'")
+    assert result.success is True
+    assert "sambot test" in result.output
+
+
+def test_tool_executor_run_command_blocks_protected_branches(tmp_path: Path):
+    """ToolExecutor.run_command blocks pushes to protected branches."""
+    from sambot.agent.tools import ToolExecutor
+
+    executor = ToolExecutor(tmp_path)
+
+    result = executor.run_command("git checkout develop")
+    assert result.success is False
+    assert "protected" in result.output.lower() or "blocked" in result.output.lower()
+
+    result = executor.run_command("git push origin main")
+    assert result.success is False
+    assert "protected" in result.output.lower() or "blocked" in result.output.lower()
+
+
+def test_tool_executor_run_command_blocks_dangerous(tmp_path: Path):
+    """ToolExecutor.run_command blocks dangerous commands."""
+    from sambot.agent.tools import ToolExecutor
+
+    executor = ToolExecutor(tmp_path)
+    result = executor.run_command("rm -rf /")
+    assert result.success is False
+    assert "blocked" in result.output.lower() or "dangerous" in result.output.lower()
+
+
+def test_tool_executor_run_command_timeout(tmp_path: Path):
+    """ToolExecutor.run_command enforces timeout."""
+    from sambot.agent.tools import ToolExecutor
+
+    executor = ToolExecutor(tmp_path)
+    # min timeout is 10s in run_command, so use sleep 15 vs timeout=10
+    result = executor.run_command("sleep 15", timeout=10)
+    assert result.success is False
+    assert "timed out" in result.output.lower()
+
+
+def test_tool_executor_execute_new_tools(tmp_path: Path):
+    """ToolExecutor.execute dispatches new tools correctly."""
+    from sambot.agent.tools import ToolExecutor
+
+    (tmp_path / "test.py").write_text("pass")
+    executor = ToolExecutor(tmp_path)
+
+    result = executor.execute("search_files", {"pattern": "*.py"})
+    assert result.success is True
+
+    result = executor.execute("grep_file", {"pattern": "pass"})
+    assert result.success is True
+
+    result = executor.execute("run_command", {"command": "echo ok"})
+    assert result.success is True
+
+
+# ---------- AgentResult blocked tests ----------
+
+
+def test_agent_result_blocked_summary():
+    """AgentResult.summary reflects blocked state."""
+    from sambot.agent.loop import AgentResult
+
+    result = AgentResult(
+        success=False,
+        passes_used=3,
+        blocked=True,
+        error="Tests still failing after 3 passes",
+    )
+    assert "Blocked" in result.summary

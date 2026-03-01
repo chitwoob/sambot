@@ -48,3 +48,21 @@ class AgentQuestion(SQLModel, table=True):
     slack_thread_ts: str = Field(default="")
     asked_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     answered_at: datetime | None = Field(default=None)
+
+
+class DockerPermission(SQLModel, table=True):
+    """Tracks Docker file run permissions granted via Slack.
+
+    Once a Docker file is approved for a given repo, the coder
+    will not re-ask for permission on subsequent runs.
+    """
+
+    id: int | None = Field(default=None, primary_key=True)
+    repo: str = Field(index=True, description="owner/repo")
+    file_path: str = Field(description="Relative path to Docker file, e.g. Dockerfile or docker-compose.yml")
+    file_hash: str = Field(default="", description="SHA-256 of the file content at approval time")
+    approved: bool = Field(default=False)
+    approved_by: str = Field(default="", description="Slack user who approved")
+    slack_thread_ts: str = Field(default="")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    approved_at: datetime | None = Field(default=None)

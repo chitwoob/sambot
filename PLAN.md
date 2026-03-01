@@ -130,8 +130,11 @@ PASS N:
 - Base branch: `develop`
 - Feature branches: `feature/<issue-num>-<slug>`
 - Bug branches: `bug/<issue-num>-<slug>`
-- PRs always target `develop`
+- PRs always target `develop` (or another feature branch, NEVER `main`)
 - Determined by issue labels (label "bug" → bug/, else feature/)
+- Coder NEVER pushes to `develop` or `main` directly
+- Always starts from a clean `develop` branch
+- Can stack feature branches when multiple stories are in review
 
 ### 5. Test Gating
 - Agent MUST run tests after making changes
@@ -144,6 +147,26 @@ PASS N:
 - Questions posted to `#sambot-questions` channel in a thread
 - Agent pauses until human responds (or timeout)
 - Response fed back into agent context
+
+### 10. Ready-Scan Workflow
+- Poller scans for items with "Ready" status on the GitHub Projects board
+- Items picked in priority order (top-to-bottom as they appear on the board)
+- Once picked, item moves to "In Progress"
+- When done: moves to "In Review" (with PR posted to Slack) or "Blocked" if issues
+
+### 11. Language-Agnostic Coder
+- The coder does NOT assume any particular language or stack
+- It scans the repo to discover the tech stack (package files, configs, etc.)
+- It generates Dockerfile and docker-compose.yml for building and testing
+- Before running any newly generated Docker files, it MUST ask for permission via Slack
+- Permissions are persistent — once approved, the coder won't ask again for the same file
+- All dev files (Dockerfiles, compose, etc.) are committed to the working repo
+
+### 12. PR Merge on Approval
+- When a PR is approved, coder merges into `develop` or another feature branch (NEVER `main`)
+- All merges use rebase strategy
+- If the merge/rebase is complex (conflicts), request a new review before completing
+- If the merge is clean, automatically complete the merge into develop or the feature branch
 
 ### 7. Three Slack Channels
 | Channel               | Purpose                                          |
@@ -170,18 +193,30 @@ PASS N:
 ## Workflow: Story → PR
 
 ```
-1. Trigger: Poller detects story → "In Progress" OR `/sambot start <issue>`
-2. Fetch issue + load MEMORY.md
-3. Create branch from develop: feature/<num>-slug
-4. Agent loop (multi-pass):
+1. Trigger: Poller detects story in "Ready" status on project board
+2. Pick the highest-priority item (top-to-bottom order)
+3. Move item to "In Progress" on the project board
+4. Fetch issue details + load MEMORY.md
+5. Create clean branch from develop: feature/<num>-slug
+   (OR stack on top of another feature branch if stories are queued)
+6. Scan repo to detect stack/language (if first time)
+7. Generate Dockerfile/docker-compose if not present
+8. Ask permission in Slack to run new Docker files (persisted)
+9. Agent loop (multi-pass):
    a. Analyze story + memory + code
    b. Generate/modify code + tests
-   c. Run pytest
+   c. Run tests (via Docker if available)
    d. If fail → fix → repeat
-   e. If blocked → Slack Q&A → continue
-5. All tests pass → commit + push
-6. Claude generates PR description
-7. Create PR → develop
-8. Comment on issue, move to "In Review"
-9. Compress new facts → update MEMORY.md
+   e. If blocked → ask question via Slack → continue
+10. All tests pass → commit + push to feature branch
+11. Claude generates PR description
+12. Create PR → develop (or feature branch, never main)
+13. Post PR link to Slack #sambot-progress
+14. Move project item to "In Review"
+15. Compress new facts → update MEMORY.md
+16. On PR approval:
+    a. Rebase merge into develop (or feature branch)
+    b. If merge is complex → request new review
+    c. If merge is clean → complete automatically
+17. If blocked at any point → move to "Blocked" on project board
 ```

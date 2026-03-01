@@ -39,6 +39,7 @@ query($login: String!, $projectNumber: Int!, $first: Int!) {
             }
           }
           content {
+            __typename
             ... on Issue {
               number
               title
@@ -47,6 +48,14 @@ query($login: String!, $projectNumber: Int!, $first: Int!) {
               labels(first: 10) {
                 nodes { name }
               }
+            }
+            ... on DraftIssue {
+              title
+              body
+            }
+            ... on PullRequest {
+              number
+              title
             }
           }
         }
@@ -96,6 +105,42 @@ query($login: String!, $projectNumber: Int!) {
 }
 """
 
+# Mutation to convert a DraftIssue into a real Issue
+MUTATION_CONVERT_DRAFT = """
+mutation($itemId: ID!, $repositoryId: ID!) {
+  convertProjectV2DraftIssueItemToIssue(
+    input: {
+      itemId: $itemId
+      repositoryId: $repositoryId
+    }
+  ) {
+    item {
+      id
+      content {
+        ... on Issue {
+          number
+          title
+          body
+          state
+          labels(first: 10) {
+            nodes { name }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+# Query to get the repository node ID (needed for draft conversion)
+QUERY_REPO_ID = """
+query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    id
+  }
+}
+"""
+
 
 @dataclass
 class ProjectItem:
@@ -118,11 +163,16 @@ class ProjectsClient:
         self._repo = repo
         self._project_number = project_number
         self._project_id: str | None = None
+        self._repo_id: str | None = None
         self._status_field_id: str | None = None
         self._status_options: dict[str, str] = {}
 
     async def get_items(self, first: int = 50) -> list[ProjectItem]:
-        """Fetch items from the project board."""
+        """Fetch items from the project board.
+
+        DraftIssues are automatically converted to real Issues so they
+        get issue numbers and can be processed by the pipeline.
+        """
         data = await self._github.graphql(
             QUERY_PROJECT_ITEMS,
             {
@@ -135,19 +185,25 @@ class ProjectsClient:
         project = data["user"]["projectV2"]
         self._project_id = project["id"]
         items = []
+        drafts_to_convert: list[tuple[str, str, str]] = []  # (item_id, title, status)
 
         for node in project["items"]["nodes"]:
             content = node.get("content")
-            if not content or "number" not in content:
+            if not content:
                 continue
 
-            # Extract status from field values
-            status = ""
-            for fv in node["fieldValues"]["nodes"]:
-                field = fv.get("field", {})
-                if field.get("name") == "Status" and "name" in fv:
-                    status = fv["name"]
+            content_type = content.get("__typename", "")
 
+            # Collect DraftIssues for conversion
+            if content_type == "DraftIssue":
+                status = self._extract_status(node)
+                drafts_to_convert.append((node["id"], content.get("title", "?"), status))
+                continue
+
+            if "number" not in content:
+                continue
+
+            status = self._extract_status(node)
             items.append(
                 ProjectItem(
                     item_id=node["id"],
@@ -159,8 +215,47 @@ class ProjectsClient:
                 )
             )
 
+        # Auto-convert DraftIssues that are in a workable status (not Done)
+        for item_id, title, status in drafts_to_convert:
+            if status.lower() == "done":
+                continue  # skip completed drafts — no need to convert
+            try:
+                converted = await self.convert_draft_to_issue(item_id)
+                if converted:
+                    converted_status = status  # status is preserved on the board
+                    items.append(
+                        ProjectItem(
+                            item_id=converted["item"]["id"],
+                            issue_number=converted["item"]["content"]["number"],
+                            title=converted["item"]["content"]["title"],
+                            body=converted["item"]["content"].get("body", ""),
+                            status=converted_status,
+                            labels=[
+                                label["name"]
+                                for label in converted["item"]["content"]
+                                .get("labels", {})
+                                .get("nodes", [])
+                            ],
+                        )
+                    )
+            except Exception:
+                logger.exception(
+                    "projects.draft_conversion_failed",
+                    item_id=item_id,
+                    title=title,
+                )
+
         logger.info("projects.fetched_items", count=len(items), project=project["title"])
         return items
+
+    @staticmethod
+    def _extract_status(node: dict) -> str:
+        """Extract the Status field value from a project item node."""
+        for fv in node["fieldValues"]["nodes"]:
+            field = fv.get("field", {})
+            if field.get("name") == "Status" and "name" in fv:
+                return fv["name"]
+        return ""
 
     async def load_field_metadata(self) -> None:
         """Load project field IDs and status options."""
@@ -184,12 +279,65 @@ class ProjectsClient:
                     options=list(self._status_options.keys()),
                 )
 
+    async def _ensure_repo_id(self) -> str:
+        """Fetch and cache the repository's GraphQL node ID."""
+        if self._repo_id:
+            return self._repo_id
+        data = await self._github.graphql(
+            QUERY_REPO_ID,
+            {"owner": self._owner, "name": self._repo},
+        )
+        self._repo_id = data["repository"]["id"]
+        return self._repo_id
+
+    async def convert_draft_to_issue(self, item_id: str) -> dict | None:
+        """Convert a DraftIssue project item into a real GitHub Issue.
+
+        Returns the mutation result containing the new issue details,
+        or None if the project ID is not yet known.
+        """
+        if not self._project_id:
+            logger.warning("projects.convert_draft_no_project_id")
+            return None
+
+        repo_id = await self._ensure_repo_id()
+        logger.info("projects.converting_draft", item_id=item_id)
+
+        data = await self._github.graphql(
+            MUTATION_CONVERT_DRAFT,
+            {
+                "itemId": item_id,
+                "repositoryId": repo_id,
+            },
+        )
+        result = data["convertProjectV2DraftIssueItemToIssue"]
+        issue_number = result["item"]["content"]["number"]
+        logger.info(
+            "projects.draft_converted",
+            item_id=item_id,
+            issue_number=issue_number,
+        )
+        return result
+
     async def update_status(self, item_id: str, status_name: str) -> None:
-        """Move a project item to a different status column."""
+        """Move a project item to a different status column.
+
+        Performs case-insensitive matching against available options.
+        """
         if not self._status_field_id:
             await self.load_field_metadata()
 
+        # Case-insensitive lookup
         option_id = self._status_options.get(status_name)
+        if not option_id:
+            # Try case-insensitive match
+            lower = status_name.lower()
+            for name, oid in self._status_options.items():
+                if name.lower() == lower:
+                    option_id = oid
+                    status_name = name  # use the canonical name
+                    break
+
         if not option_id:
             raise ValueError(
                 f"Unknown status '{status_name}'. "

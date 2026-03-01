@@ -1,8 +1,18 @@
-"""Multi-pass agent loop — orchestrates the full coding workflow."""
+"""Multi-pass agent loop — orchestrates the full coding workflow.
+
+The AgentLoop now handles:
+- Repo scanning to detect the tech stack (language-agnostic)
+- Docker/docker-compose generation and permission management
+- Branch safety (never touches develop or main directly)
+- Test execution via the detected framework or Docker
+- PR creation targeting develop (or stacked feature branches)
+"""
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -30,6 +40,7 @@ class AgentResult:
     test_output: str = ""
     final_message: str = ""
     questions_asked: list[dict] = field(default_factory=list)
+    blocked: bool = False
     error: str = ""
 
     @property
@@ -40,6 +51,8 @@ class AgentResult:
                 f"Changed {len(self.files_changed)} file(s). "
                 f"Asked {len(self.questions_asked)} question(s)."
             )
+        if self.blocked:
+            return f"🚫 Blocked after {self.passes_used} pass(es): {self.error}"
         return f"❌ Failed after {self.passes_used} pass(es): {self.error}"
 
 
@@ -48,12 +61,14 @@ class AgentLoop:
     Orchestrates the multi-pass coding agent.
 
     The loop:
-    1. Analyze story + memory + codebase
-    2. Code + write tests using tools
-    3. Run tests
-    4. If tests fail → analyze errors → next pass
-    5. If blocked → ask question via Slack → continue
-    6. If all tests pass → done
+    1. Scan repo to detect tech stack
+    2. Generate Docker/compose if missing, request permission
+    3. Analyze story + memory + codebase
+    4. Code + write tests using tools
+    5. Run tests
+    6. If tests fail → analyze errors → next pass
+    7. If blocked → ask question via Slack → continue
+    8. If all tests pass → done
     """
 
     def __init__(
@@ -66,6 +81,7 @@ class AgentLoop:
         model: str = "claude-sonnet-4-20250514",
         on_progress: Any | None = None,
         ask_question_handler: Any | None = None,
+        docker_permission_handler: Any | None = None,
     ) -> None:
         self._work_dir = work_dir
         self._anthropic_client = anthropic_client
@@ -73,6 +89,7 @@ class AgentLoop:
         self._model = model
         self._on_progress = on_progress
         self._ask_question_handler = ask_question_handler
+        self._docker_permission_handler = docker_permission_handler
         self._questions_asked: list[dict] = []
 
         # Initialize components
@@ -84,6 +101,10 @@ class AgentLoop:
             tool_executor=self._tools,
             test_runner=self._test_runner,
             model=model,
+        )
+        self._coder.set_handlers(
+            ask_question_handler=ask_question_handler,
+            docker_permission_handler=docker_permission_handler,
         )
 
     def _progress(self, message: str) -> None:
@@ -108,6 +129,12 @@ class AgentLoop:
         """
         Run the agent loop for a story.
 
+        The coder will:
+        1. Scan the repo to understand the tech stack
+        2. Generate Docker files if needed (with permission)
+        3. Implement the story
+        4. Run tests and iterate until they pass
+
         Args:
             story_title: Issue title
             story_body: Issue body/description
@@ -131,18 +158,26 @@ class AgentLoop:
             # Build the user message for this pass
             if pass_num == 1:
                 user_message = (
-                    f"Implement the following story. Read the codebase first to understand "
-                    f"the project structure, then make the necessary code changes AND write "
-                    f"tests. Run tests when done.\n\n"
+                    f"Implement the following story.\n\n"
+                    f"**FIRST**: Scan the repo structure (list_directory, search_files) to "
+                    f"understand the project layout, tech stack, and conventions. Look for "
+                    f"package manifests, config files, and existing Docker files.\n\n"
+                    f"**IF** the project doesn't have Docker/docker-compose files for "
+                    f"building and testing, generate appropriate ones based on the detected "
+                    f"stack. Call request_docker_permission before running any Docker files "
+                    f"you create.\n\n"
+                    f"**THEN**: Read relevant code, implement the changes, write tests, "
+                    f"and run the test suite. All tests must pass.\n\n"
+                    f"Remember: you are on a feature branch. Never push to develop or main.\n\n"
                     f"**Story:** {story_title}\n\n"
                     f"**Details:**\n{story_body}"
                 )
             else:
                 # On subsequent passes, we continue the conversation
-                # The coder already has the context from previous passes
                 user_message = (
                     "The tests failed in the previous pass. Analyze the failures above, "
-                    "fix the code, and run tests again. Make sure all tests pass."
+                    "fix the code, and run tests again. Make sure all tests pass. "
+                    "Remember: never push to develop or main."
                 )
 
             # Execute the coding pass
@@ -190,6 +225,7 @@ class AgentLoop:
             files_changed=all_files_changed,
             test_output=last_test_output,
             questions_asked=self._questions_asked,
+            blocked=True,
             error=f"Tests still failing after {self._max_passes} passes",
         )
 

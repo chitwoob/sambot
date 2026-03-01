@@ -25,7 +25,7 @@ class _FakeItem:
 def _make_poller(monkeypatch):
     """Factory that builds a GitHubPoller with mocked dependencies."""
 
-    def _factory(items: list[_FakeItem], *, on_trigger=None, trigger_status="In Progress"):
+    def _factory(items: list[_FakeItem], *, on_trigger=None, on_pr_approved=None, trigger_status="Ready"):
         from sambot.config import get_settings
 
         settings = get_settings()
@@ -42,6 +42,7 @@ def _make_poller(monkeypatch):
             github_mock,
             projects_mock,
             on_trigger=on_trigger,
+            on_pr_approved=on_pr_approved,
             trigger_status=trigger_status,
         )
 
@@ -49,11 +50,11 @@ def _make_poller(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_poller_triggers_in_progress(_make_poller):
-    """Poller fires callback for items with 'In Progress' status."""
+async def test_poller_triggers_ready(_make_poller):
+    """Poller fires callback for items with 'Ready' status."""
     triggered = []
     items = [
-        _FakeItem("id1", 10, "Feature A", "", "In Progress", ["feature"]),
+        _FakeItem("id1", 10, "Feature A", "", "Ready", ["feature"]),
         _FakeItem("id2", 20, "Feature B", "", "Todo", []),
     ]
 
@@ -67,7 +68,7 @@ async def test_poller_triggers_in_progress(_make_poller):
 async def test_poller_skips_already_seen(_make_poller):
     """Poller does not re-trigger issues it has already dispatched."""
     triggered = []
-    items = [_FakeItem("id1", 10, "Feature A", "", "In Progress", [])]
+    items = [_FakeItem("id1", 10, "Feature A", "", "Ready", [])]
 
     poller = _make_poller(items, on_trigger=lambda item: triggered.append(item.issue_number))
 
@@ -81,7 +82,7 @@ async def test_poller_skips_already_seen(_make_poller):
 async def test_poller_mark_seen(_make_poller):
     """Manually marking an issue as seen prevents triggering."""
     triggered = []
-    items = [_FakeItem("id1", 10, "Feature A", "", "In Progress", [])]
+    items = [_FakeItem("id1", 10, "Feature A", "", "Ready", [])]
 
     poller = _make_poller(items, on_trigger=lambda item: triggered.append(item.issue_number))
     poller.mark_seen(10)
@@ -93,7 +94,7 @@ async def test_poller_mark_seen(_make_poller):
 @pytest.mark.asyncio
 async def test_poller_seen_issues_property(_make_poller):
     """seen_issues returns a copy of dispatched issue numbers."""
-    items = [_FakeItem("id1", 10, "Feature A", "", "In Progress", [])]
+    items = [_FakeItem("id1", 10, "Feature A", "", "Ready", [])]
     poller = _make_poller(items, on_trigger=lambda _: None)
 
     assert poller.seen_issues == set()
@@ -123,7 +124,7 @@ async def test_poller_custom_trigger_status(_make_poller):
 @pytest.mark.asyncio
 async def test_poller_no_callback(_make_poller):
     """Poller still tracks seen issues even without a callback."""
-    items = [_FakeItem("id1", 10, "Feature A", "", "In Progress", [])]
+    items = [_FakeItem("id1", 10, "Feature A", "", "Ready", [])]
     poller = _make_poller(items)
 
     await poller._poll()
@@ -134,7 +135,7 @@ async def test_poller_no_callback(_make_poller):
 async def test_poller_case_insensitive(_make_poller):
     """Status matching is case-insensitive."""
     triggered = []
-    items = [_FakeItem("id1", 10, "Fix", "", "in progress", [])]
+    items = [_FakeItem("id1", 10, "Fix", "", "ready", [])]
 
     poller = _make_poller(items, on_trigger=lambda item: triggered.append(item.issue_number))
     await poller._poll()
@@ -171,12 +172,75 @@ async def test_poller_callback_error_is_logged(_make_poller):
         raise RuntimeError("boom")
 
     items = [
-        _FakeItem("id1", 10, "A", "", "In Progress", []),
-        _FakeItem("id2", 20, "B", "", "In Progress", []),
+        _FakeItem("id1", 10, "A", "", "Ready", []),
+        _FakeItem("id2", 20, "B", "", "Ready", []),
     ]
     poller = _make_poller(items, on_trigger=_bad_callback)
     await poller._poll()
 
-    # Both should have been attempted despite first raising
-    assert call_count == 2
-    assert poller.seen_issues == {10, 20}
+    # Only the first (highest priority) should be attempted per poll cycle
+    assert call_count == 1
+    assert 10 in poller.seen_issues
+
+
+@pytest.mark.asyncio
+async def test_poller_picks_one_per_cycle(_make_poller):
+    """Poller only picks the highest-priority Ready item per cycle."""
+    triggered = []
+    items = [
+        _FakeItem("id1", 10, "First", "", "Ready", []),
+        _FakeItem("id2", 20, "Second", "", "Ready", []),
+        _FakeItem("id3", 30, "Third", "", "Ready", []),
+    ]
+
+    poller = _make_poller(items, on_trigger=lambda item: triggered.append(item.issue_number))
+
+    # First poll picks item 10
+    await poller._poll()
+    assert triggered == [10]
+
+    # Second poll picks item 20
+    await poller._poll()
+    assert triggered == [10, 20]
+
+    # Third poll picks item 30
+    await poller._poll()
+    assert triggered == [10, 20, 30]
+
+
+@pytest.mark.asyncio
+async def test_poller_recycles_returned_items(_make_poller):
+    """Poller re-triggers items that moved out of Ready and came back."""
+    triggered = []
+
+    # Poll 1: item 10 is Ready, gets triggered
+    items_ready = [_FakeItem("id1", 10, "Feature A", "", "Ready", [])]
+    poller = _make_poller(items_ready, on_trigger=lambda item: triggered.append(item.issue_number))
+    await poller._poll()
+    assert triggered == [10]
+
+    # Poll 2: item 10 moved to In Progress (worker picked it up)
+    items_in_progress = [_FakeItem("id1", 10, "Feature A", "", "In progress", [])]
+    poller._projects.get_items.return_value = items_in_progress
+    await poller._poll()
+    assert triggered == [10]  # no new trigger
+
+    # Poll 3: item 10 returned to Ready (worker crashed)
+    poller._projects.get_items.return_value = items_ready
+    await poller._poll()
+    assert triggered == [10, 10]  # re-triggered!
+
+
+@pytest.mark.asyncio
+async def test_poller_does_not_recycle_without_leaving(_make_poller):
+    """Poller does NOT re-trigger items that stay in Ready (no round-trip)."""
+    triggered = []
+    items = [_FakeItem("id1", 10, "Feature A", "", "Ready", [])]
+    poller = _make_poller(items, on_trigger=lambda item: triggered.append(item.issue_number))
+
+    await poller._poll()
+    assert triggered == [10]
+
+    # Item stays in Ready — should NOT be re-triggered
+    await poller._poll()
+    assert triggered == [10]
