@@ -59,49 +59,13 @@ class PRManager:
         logger.info("branch.created", branch=branch_name, base=base_branch)
 
     def determine_base_branch(self) -> str:
-        """Determine the best base branch for a new feature.
+        """Return the base branch for new feature work.
 
-        If there are open PRs targeting develop (stacked reviews),
-        the latest feature branch is returned so coder can stack on it.
-        Otherwise, returns the default base branch (develop).
-
-        The stacking branch must actually exist on the remote —
-        we verify before returning it.
+        Always branches from the head of the remote default branch (develop).
 
         Returns:
             Branch name to base new work from.
         """
-        try:
-            repo = self._github.repo
-            open_prs = repo.get_pulls(state="open", base=self._base_branch, sort="created", direction="desc")
-            latest_pr = None
-            for pr in open_prs:
-                # Pick the most recently created open PR targeting develop
-                latest_pr = pr
-                break
-
-            if latest_pr:
-                # Verify the branch still exists on the remote
-                try:
-                    repo.get_branch(latest_pr.head.ref)
-                except Exception:
-                    logger.warning(
-                        "branch.stacking_branch_missing",
-                        branch=latest_pr.head.ref,
-                        pr=latest_pr.number,
-                    )
-                    return self._base_branch
-
-                logger.info(
-                    "branch.stacking",
-                    base=latest_pr.head.ref,
-                    stacked_on_pr=latest_pr.number,
-                )
-                return latest_pr.head.ref
-
-        except Exception:
-            logger.exception("branch.determine_base_error")
-
         return self._base_branch
 
     def create_pr(
@@ -138,6 +102,16 @@ class PRManager:
 
         logger.info("pr.created", pr_number=pr.number, title=title, base=target)
         return pr.number
+
+    def find_open_pr_for_branch(self, head_branch: str) -> int | None:
+        """Return the PR number of an open PR for *head_branch*, or None."""
+        repo = self._github.repo
+        owner = repo.owner.login
+        pulls = repo.get_pulls(state="open", head=f"{owner}:{head_branch}")
+        for pr in pulls:
+            logger.info("pr.found_existing", pr_number=pr.number, branch=head_branch)
+            return pr.number
+        return None
 
     def rebase_merge(self, pr_number: int, work_dir: Path | None = None) -> dict:
         """Merge a PR using rebase strategy.
@@ -283,6 +257,26 @@ class PRManager:
             "labels": [label.name for label in issue.labels],
             "state": issue.state,
         }
+
+    def get_issue_comments(self, issue_number: int, limit: int = 10) -> list[dict]:
+        """Fetch recent comments on an issue, excluding SamBot's own comments.
+
+        Returns comments in chronological order (oldest first), up to *limit*.
+        """
+        repo = self._github.repo
+        issue = repo.get_issue(issue_number)
+        all_comments = list(issue.get_comments())
+        recent = all_comments[-limit:] if len(all_comments) > limit else all_comments
+        return [
+            {
+                "author": c.user.login,
+                "body": c.body,
+                "created_at": c.created_at.isoformat(),
+            }
+            for c in recent
+            # Skip the bot's own blocked/progress comments
+            if not c.body.startswith("🤖")
+        ]
 
     def get_pr(self, pr_number: int) -> dict:
         """Fetch PR details."""

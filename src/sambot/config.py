@@ -38,7 +38,8 @@ class Settings(BaseSettings):
     redis_url: str = Field(default="redis://localhost:6379/0", description="Redis connection URL")
 
     # --- App ---
-    sambot_log_level: str = Field(default="INFO", description="Log level")
+    sambot_log_level: str = Field(default="DEBUG", description="Log level")
+    sambot_model: str = Field(default="claude-sonnet-4-5", description="Anthropic model name for the coding and LLM agents")
     sambot_work_dir: Path = Field(default=Path("/tmp/sambot-workspaces"), description="Working directory for cloned repos")
     sambot_data_dir: Path = Field(default=Path("/data/sambot"), description="Directory for memory files, DB, and other persistent data")
     sambot_max_agent_passes: int = Field(default=5, description="Maximum coding passes per story")

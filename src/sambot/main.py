@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -163,15 +162,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     settings = get_settings()
 
-    # Configure logging
-    logging.basicConfig(level=getattr(logging, settings.sambot_log_level.upper()))
-    structlog.configure(
-        wrapper_class=structlog.make_filtering_bound_logger(
-            getattr(logging, settings.sambot_log_level.upper())
-        ),
-    )
+    # Configure logging (file + console, structlog routed through stdlib)
+    from sambot.logging_config import configure_logging
+    configure_logging(settings, log_filename="api.log")
 
-    logger.info("sambot.starting", repo=settings.github_repo)
+    logger.info("sambot.starting", repo=settings.github_repo, log_level=settings.sambot_log_level)
 
     # Ensure data and work directories exist
     settings.sambot_data_dir.mkdir(parents=True, exist_ok=True)

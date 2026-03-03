@@ -36,13 +36,15 @@ class SlackQuestionHandler:
         self._pending_answer: str | None = None
         self._answer_event = threading.Event()
 
-    def ask(self, question: str, context: str = "") -> str:
+    def ask(self, question: str, context: str = "", code_snippet: str | None = None) -> str:
         """
         Post a question to Slack and wait for a human answer.
 
         Args:
             question: The question to ask
             context: Additional context about why the agent is asking
+            code_snippet: Optional file/code content to display as a
+                          formatted snippet below the question
 
         Returns:
             The human's answer, or a timeout message
@@ -67,6 +69,18 @@ class SlackQuestionHandler:
                 "elements": [
                     {"type": "mrkdwn", "text": f"_Context: {context}_"},
                 ],
+            })
+        if code_snippet:
+            # Truncate to stay within Slack's 3000-char block text limit
+            display = code_snippet[:2700]
+            if len(code_snippet) > 2700:
+                display += "\n... (truncated)"
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*File contents:*\n```{display}```",
+                },
             })
         blocks.append({
             "type": "section",

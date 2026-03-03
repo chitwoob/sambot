@@ -27,7 +27,7 @@ class LLMClient:
 
     def __init__(self, settings: Settings, memory_content: str = "") -> None:
         self._client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-        self._model = "claude-sonnet-4-20250514"
+        self._model = settings.sambot_model
         self._memory = memory_content
 
     @property
@@ -90,6 +90,15 @@ class LLMClient:
         if system:
             kwargs["system"] = system
 
+        logger.debug(
+            "llm.request",
+            model=self._model,
+            max_tokens=max_tokens,
+            system_chars=len(kwargs.get("system", "")),
+            system_preview=kwargs.get("system", "")[:500],
+            prompt=prompt,
+        )
+
         response = self._client.messages.create(**kwargs)
 
         text = response.content[0].text
@@ -98,7 +107,13 @@ class LLMClient:
             model=self._model,
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
-            has_memory=bool(self._memory) and "complete_raw" not in str(kwargs.get("system", "")[:50]),
+        )
+        logger.debug(
+            "llm.response",
+            model=self._model,
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+            response_text=text,
         )
         return text
 

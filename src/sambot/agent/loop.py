@@ -5,7 +5,7 @@ The AgentLoop now handles:
 - Docker/docker-compose generation and permission management
 - Branch safety (never touches develop or main directly)
 - Test execution via the detected framework or Docker
-- PR creation targeting develop (or stacked feature branches)
+- PR creation targeting develop
 """
 
 from __future__ import annotations
@@ -21,7 +21,14 @@ from sambot.agent.coder import Coder
 from sambot.agent.memory import MemoryManager, compress_memory
 from sambot.agent.test_runner import TestRunner
 from sambot.agent.tools import ToolExecutor
-from sambot.llm.prompts import CODING_AGENT_SYSTEM, build_system_prompt
+from sambot.llm.prompts import CODING_AGENT_SYSTEM, INFRA_AGENT_SYSTEM, build_system_prompt
+
+# Labels that indicate the task is infrastructure / config work with no
+# meaningful Python test suite.  For these tasks the agent succeeds as soon
+# as Claude finishes cleanly (end_turn) rather than requiring pytest to pass.
+_INFRA_LABELS: frozenset[str] = frozenset(
+    {"infrastructure", "docker", "devops", "ci", "cd", "chore", "documentation", "docs"}
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -78,7 +85,7 @@ class AgentLoop:
         memory_path: Path | None = None,
         max_passes: int = 5,
         max_memory_tokens: int = 2000,
-        model: str = "claude-sonnet-4-20250514",
+        model: str = "claude-sonnet-4-5",
         on_progress: Any | None = None,
         ask_question_handler: Any | None = None,
         docker_permission_handler: Any | None = None,
@@ -120,6 +127,13 @@ class AgentLoop:
             return self._ask_question_handler(question, context)
         return "No Q&A channel available. Use your best judgment."
 
+    @staticmethod
+    def _is_infra_task(labels: list[str] | None) -> bool:
+        """Return True when labels signal an infrastructure / config story."""
+        if not labels:
+            return False
+        return bool(_INFRA_LABELS.intersection({lbl.lower() for lbl in labels}))
+
     def run(
         self,
         story_title: str,
@@ -147,16 +161,45 @@ class AgentLoop:
         self._questions_asked = []
         all_files_changed: list[str] = []
 
+        infra_task = self._is_infra_task(labels)
+        # Infrastructure tasks only need one pass — they don't have a Python
+        # test suite to run, and extra passes just burn tokens.
+        effective_max_passes = 1 if infra_task else self._max_passes
+        agent_system = INFRA_AGENT_SYSTEM if infra_task else CODING_AGENT_SYSTEM
+
+        if infra_task:
+            self._progress("🏗️ Infrastructure task detected — test loop disabled")
+
         # Build context from memory + story
         story_context = self._memory.build_story_context(story_title, story_body, labels)
         memory_content = self._memory.load()
-        system_prompt = build_system_prompt(CODING_AGENT_SYSTEM, memory_content) + "\n\n" + story_context
+        system_prompt = build_system_prompt(agent_system, memory_content) + "\n\n" + story_context
 
-        for pass_num in range(1, self._max_passes + 1):
-            self._progress(f"📋 Pass {pass_num}/{self._max_passes}")
+        test_result = None
+        for pass_num in range(1, effective_max_passes + 1):
+            self._progress(f"📋 Pass {pass_num}/{effective_max_passes}")
 
             # Build the user message for this pass
-            if pass_num == 1:
+            if infra_task:
+                # One-shot: explore → create files → commit. No test loop.
+                user_message = (
+                    f"Implement the following infrastructure story.\n\n"
+                    f"**Step 1 — Discover**: Use list_directory and search_files to "
+                    f"map the full repo structure, find all package manifests, existing "
+                    f"Dockerfiles, build scripts, and README files.\n\n"
+                    f"**Step 2 — Implement**: Create all required config/infrastructure "
+                    f"files (Dockerfiles, docker-compose, scripts, docs, etc.). "
+                    f"Do NOT write Python test files — this is not a Python project task. "
+                    f"Validation is done by the team running the resulting Docker setup, "
+                    f"not by pytest.\n\n"
+                    f"**Step 3 — Verify syntax only**: You may run "
+                    f"`docker compose config` or `yamllint` to check file syntax if those "
+                    f"tools are available, but do NOT attempt to build or run containers.\n\n"
+                    f"Remember: you are on a feature branch. Never push to develop or main.\n\n"
+                    f"**Story:** {story_title}\n\n"
+                    f"**Details:**\n{story_body}"
+                )
+            elif pass_num == 1:
                 user_message = (
                     f"Implement the following story.\n\n"
                     f"**FIRST**: Scan the repo structure (list_directory, search_files) to "
@@ -173,11 +216,15 @@ class AgentLoop:
                     f"**Details:**\n{story_body}"
                 )
             else:
-                # On subsequent passes, we continue the conversation
+                # Fresh conversation each pass — include failure context explicitly
+                failure_context = ""
+                if test_result and test_result.output:
+                    failure_context = f"\n\n**Test output from previous pass:**\n```\n{test_result.output[:4000]}\n```"
                 user_message = (
-                    "The tests failed in the previous pass. Analyze the failures above, "
-                    "fix the code, and run tests again. Make sure all tests pass. "
-                    "Remember: never push to develop or main."
+                    f"The tests failed in the previous pass. Analyze the failures below, "
+                    f"fix the code, and run tests again. Make sure all tests pass. "
+                    f"Remember: never push to develop or main."
+                    f"{failure_context}"
                 )
 
             # Execute the coding pass
@@ -195,7 +242,29 @@ class AgentLoop:
 
             test_result = pass_result.get("test_result")
 
-            # Check if tests passed
+            # --- Infrastructure tasks: succeed as soon as Claude finishes cleanly ---
+            if infra_task:
+                if pass_result.get("success"):
+                    self._progress(f"✅ Infrastructure task completed on pass {pass_num}!")
+                    return AgentResult(
+                        success=True,
+                        passes_used=pass_num,
+                        files_changed=all_files_changed,
+                        test_output="",
+                        final_message=pass_result.get("message", ""),
+                        questions_asked=self._questions_asked,
+                    )
+                # Claude didn't finish cleanly (tool-round exhaustion)
+                return AgentResult(
+                    success=False,
+                    passes_used=pass_num,
+                    files_changed=all_files_changed,
+                    questions_asked=self._questions_asked,
+                    blocked=True,
+                    error="Agent exhausted tool rounds without completing the task",
+                )
+
+            # --- Code tasks: require tests to pass ---
             if test_result and test_result.success:
                 self._progress(f"✅ All tests passed on pass {pass_num}!")
 
@@ -221,7 +290,7 @@ class AgentLoop:
 
         return AgentResult(
             success=False,
-            passes_used=self._max_passes,
+            passes_used=effective_max_passes,
             files_changed=all_files_changed,
             test_output=last_test_output,
             questions_asked=self._questions_asked,

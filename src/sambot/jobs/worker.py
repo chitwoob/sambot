@@ -3,7 +3,7 @@
 Complete story processing pipeline:
 1. Fetch issue details from GitHub
 2. Move project item to "In Progress"
-3. Clone repo, create clean feature branch from develop (or stack)
+3. Clone repo, create feature/bug branch from head of remote develop
 4. Load memory
 5. Run agent loop (multi-pass, language-agnostic, Docker-aware)
 6. Commit, push, create PR (if tests pass)
@@ -119,11 +119,10 @@ def _clone_repo(settings, branch: str | None = None) -> Path:
 
 
 def _create_feature_branch(work_dir: Path, branch_name: str, base: str = "develop") -> None:
-    """Create and checkout a feature branch from the base.
+    """Create and checkout a feature/bug branch from the base branch.
 
-    If the requested base branch doesn't exist on the remote we fall back
-    to ``origin/develop`` (the repo's default integration branch) so the
-    job never crashes just because a stacking branch was deleted.
+    If the requested base branch doesn't exist on the remote, falls back
+    to ``origin/develop`` so the job never crashes on a missing branch.
 
     If the local branch already exists (stale from a previous run), it is
     deleted first so a fresh one can be created.
@@ -161,36 +160,61 @@ def _create_feature_branch(work_dir: Path, branch_name: str, base: str = "develo
         logger.info("worker.branch_created", branch=branch_name, base=base)
 
 
-def _commit_and_push(work_dir: Path, branch_name: str, message: str, files: list[str]) -> bool:
-    """Stage changed files, commit, and push to the feature branch.
+def _commit_and_push(
+    work_dir: Path,
+    branch_name: str,
+    message: str,
+    files: list[str],
+    base_branch: str = "develop",
+) -> bool:
+    """Stage changed files, commit if needed, and push to the feature branch.
+
+    Raises RuntimeError if the feature branch has no commits ahead of
+    *base_branch* — which would cause GitHub to reject the PR with 422.
 
     Returns True if push succeeded.
     """
+    if branch_name.lower() in ("develop", "main", "master"):
+        raise ValueError(f"Refusing to push to protected branch: {branch_name}")
+
     # Stage all changes (including new files)
     subprocess.run(
         ["git", "add", "-A"],
         cwd=work_dir, capture_output=True, check=True, timeout=30,
     )
 
-    # Check if there are changes to commit
+    # Commit only if there are staged changes — the agent may have already
+    # committed via run_command("git commit ..."), in which case we skip
+    # the commit but still push below.
     status = subprocess.run(
         ["git", "diff", "--cached", "--quiet"],
         cwd=work_dir, capture_output=True, timeout=15,
     )
     if status.returncode == 0:
         logger.info("worker.no_changes_to_commit")
-        return True
+    else:
+        subprocess.run(
+            ["git", "commit", "-m", message],
+            cwd=work_dir, capture_output=True, check=True, timeout=30,
+        )
 
-    # Commit
-    subprocess.run(
-        ["git", "commit", "-m", message],
-        cwd=work_dir, capture_output=True, check=True, timeout=30,
+    # Guard: verify the feature branch is actually ahead of the base branch.
+    # If not, GitHub will reject create_pr with a 422 "no commits" error.
+    log_result = subprocess.run(
+        ["git", "log", f"origin/{base_branch}..HEAD", "--oneline"],
+        cwd=work_dir, capture_output=True, text=True, timeout=15,
     )
+    if not log_result.stdout.strip():
+        raise RuntimeError(
+            f"No commits between '{base_branch}' and '{branch_name}'. "
+            "The agent did not make any code changes. "
+            "Move the ticket back to Ready to retry."
+        )
 
-    # Push to feature branch (never develop or main)
-    if branch_name.lower() in ("develop", "main", "master"):
-        raise ValueError(f"Refusing to push to protected branch: {branch_name}")
+    ahead_count = len(log_result.stdout.strip().splitlines())
+    logger.info("worker.commits_ahead", branch=branch_name, base=base_branch, count=ahead_count)
 
+    # Push — branch is guaranteed to diverge from base.
     subprocess.run(
         ["git", "push", "origin", branch_name],
         cwd=work_dir, capture_output=True, check=True, timeout=120,
@@ -199,8 +223,45 @@ def _commit_and_push(work_dir: Path, branch_name: str, message: str, files: list
     return True
 
 
-def _make_docker_permission_handler(settings, slack_app):
+def _push_wip_branch(work_dir: Path, branch_name: str, commit_message: str) -> None:
+    """Stage any uncommitted changes, commit if needed, and push the branch.
+
+    Used when blocked so the user can inspect the in-progress work.
+    """
+    if branch_name.lower() in ("develop", "main", "master"):
+        raise ValueError(f"Refusing to push to protected branch: {branch_name}")
+
+    # Stage everything
+    subprocess.run(
+        ["git", "add", "-A"],
+        cwd=work_dir, capture_output=True, timeout=30,
+    )
+
+    # Commit only if there are staged changes
+    staged = subprocess.run(
+        ["git", "diff", "--cached", "--quiet"],
+        cwd=work_dir, capture_output=True, timeout=15,
+    )
+    if staged.returncode != 0:
+        subprocess.run(
+            ["git", "commit", "-m", commit_message],
+            cwd=work_dir, capture_output=True, check=True, timeout=30,
+        )
+
+    # Push (will create the remote branch if it doesn't exist yet)
+    subprocess.run(
+        ["git", "push", "origin", branch_name],
+        cwd=work_dir, capture_output=True, check=True, timeout=120,
+    )
+    logger.info("worker.wip_pushed", branch=branch_name)
+
+
+def _make_docker_permission_handler(settings, slack_app, work_dir=None):
     """Create a Docker permission handler that checks DB and asks via Slack.
+
+    Args:
+        work_dir: The cloned repo path. When provided the file content is
+                  included as a code snippet in the Slack permission request.
 
     Returns a callable: (file_path: str, description: str) -> bool
     """
@@ -238,12 +299,21 @@ def _make_docker_permission_handler(settings, slack_app):
             question = (
                 f"🐳 *Docker Permission Request*\n\n"
                 f"The coder generated a new Docker file and needs permission to run it:\n\n"
-                f"**File:** `{file_path}`\n"
-                f"**Description:** {description}\n\n"
+                f"*File:* `{file_path}`\n"
+                f"*Description:* {description}\n\n"
                 f"Reply *approve* to allow running this file, or *deny* to block it."
             )
 
-            answer = qa.ask(question, context=f"Repo: {repo}")
+            # Read the file so the reviewer can see exactly what will run
+            snippet: str | None = None
+            if work_dir is not None:
+                try:
+                    from pathlib import Path as _Path
+                    snippet = (_Path(work_dir) / file_path).read_text(errors="replace")
+                except Exception:
+                    pass  # file may not exist yet; proceed without snippet
+
+            answer = qa.ask(question, context=f"Repo: {repo}", code_snippet=snippet)
 
             approved = any(
                 word in answer.lower()
@@ -281,7 +351,7 @@ def process_story(issue_number: int) -> dict:
     Pipeline:
     1. Fetch issue details from GitHub
     2. Move to "In Progress" on the project board
-    3. Clone repo + create feature branch from develop (or stack)
+    3. Clone repo + create feature/bug branch from head of remote develop
     4. Run agent loop (language-agnostic, Docker-aware)
     5. If tests pass → commit, push, create PR
     6. Post PR to Slack, move to "In Review"
@@ -298,6 +368,8 @@ def process_story(issue_number: int) -> dict:
     from sambot.slack.questions import SlackQuestionHandler
 
     settings = get_settings()
+    from sambot.logging_config import configure_logging
+    configure_logging(settings, log_filename="worker.log")
     logger.info("job.process_story.start", issue_number=issue_number)
 
     # Ensure DB is initialized in this worker process
@@ -386,6 +458,20 @@ def process_story(issue_number: int) -> dict:
         body = issue["body"]
         labels = issue["labels"]
 
+        # Append any user comments to the body so the agent can see retry
+        # instructions left by the user when they unblocked the ticket.
+        try:
+            comments = pr_manager.get_issue_comments(issue_number, limit=10)
+            if comments:
+                comments_text = "\n\n".join(
+                    f"**@{c['author']} ({c['created_at'][:10]}):**\n{c['body']}"
+                    for c in comments
+                )
+                body = body + f"\n\n---\n**Discussion / retry instructions:**\n{comments_text}"
+                logger.info("worker.injected_comments", count=len(comments), issue_number=issue_number)
+        except Exception:
+            logger.exception("worker.fetch_comments_failed", issue_number=issue_number)
+
         # Update job record
         with get_session() as session:
             job = session.get(StoryJob, job_id)
@@ -420,14 +506,10 @@ def process_story(issue_number: int) -> dict:
         work_dir = _clone_repo(settings)
         branch_name = pr_manager.create_branch_name(issue_number, title, labels)
 
-        # Determine base: stack on feature branch if needed, else develop
+        # Always branch from the head of the remote develop branch
         base_branch = pr_manager.determine_base_branch()
         _create_feature_branch(work_dir, branch_name, base=base_branch)
-
-        if base_branch != settings.sambot_base_branch:
-            progress.post(f"🔀 Stacking on `{base_branch}` (open PR in review)")
-        else:
-            progress.post(f"🌿 Created branch `{branch_name}` from `{base_branch}`")
+        progress.post(f"🌿 Created branch `{branch_name}` from `{base_branch}`")
 
         # 4. Set up question and Docker permission handlers
         qa_handler = SlackQuestionHandler(
@@ -436,7 +518,7 @@ def process_story(issue_number: int) -> dict:
             thread_ts=progress.thread_ts,
             timeout_minutes=settings.sambot_question_timeout_minutes,
         )
-        docker_handler = _make_docker_permission_handler(settings, slack_app)
+        docker_handler = _make_docker_permission_handler(settings, slack_app, work_dir)
 
         # 5. Run agent loop
         from sambot.agent.loop import AgentLoop
@@ -461,54 +543,102 @@ def process_story(issue_number: int) -> dict:
 
             # Commit and push
             commit_msg = f"feat(#{issue_number}): {title}\n\nImplemented by SamBot"
-            _commit_and_push(work_dir, branch_name, commit_msg, result.files_changed)
+            _commit_and_push(work_dir, branch_name, commit_msg, result.files_changed, base_branch=base_branch)
             progress.post(f"📤 Pushed to `{branch_name}`")
 
-            # Generate PR description
-            from sambot.llm.prompts import PR_DESCRIPTION_SYSTEM
-            pr_body = llm.complete(
-                f"Story: {title}\n\nDescription: {body}\n\n"
-                f"Files changed: {', '.join(result.files_changed)}\n\n"
-                f"Test output:\n{result.test_output[:2000]}",
-                system=PR_DESCRIPTION_SYSTEM,
-            )
+            # --- Post-push: PR creation and board update ---
+            # Wrapped separately so a GitHub API hiccup here doesn't cause the
+            # bot to re-implement an already-completed story.
+            try:
+                # Re-use an existing open PR if one was already created
+                # (handles retries where push succeeded but PR creation failed).
+                pr_number = pr_manager.find_open_pr_for_branch(branch_name)
 
-            # Create PR (targeting develop or stacked feature, never main)
-            pr_target = base_branch if base_branch != settings.sambot_base_branch else None
-            pr_number = pr_manager.create_pr(
-                title=f"feat(#{issue_number}): {title}",
-                body=pr_body,
-                head_branch=branch_name,
-                base_branch=pr_target,
-                issue_number=issue_number,
-            )
+                if pr_number:
+                    progress.post(f"🔗 PR #{pr_number} already exists for `{branch_name}` — skipping creation")
+                else:
+                    # Generate PR description
+                    from sambot.llm.prompts import PR_DESCRIPTION_SYSTEM
+                    pr_body = llm.complete(
+                        f"Story: {title}\n\nDescription: {body}\n\n"
+                        f"Files changed: {', '.join(result.files_changed)}\n\n"
+                        f"Test output:\n{result.test_output[:2000]}",
+                        system=PR_DESCRIPTION_SYSTEM,
+                    )
 
-            progress.post(f"🔗 Created PR #{pr_number} → `{pr_target or settings.sambot_base_branch}`")
+                    pr_number = pr_manager.create_pr(
+                        title=f"feat(#{issue_number}): {title}",
+                        body=pr_body,
+                        head_branch=branch_name,
+                        base_branch=None,
+                        issue_number=issue_number,
+                    )
+                    progress.post(f"🔗 Created PR #{pr_number} → `{settings.sambot_base_branch}`")
 
-            # Move to "In Review"
-            asyncio.run(_move_status("In review"))
-            progress.post("📊 Moved to *In review*")
+                # Move to "In Review"
+                asyncio.run(_move_status("In review"))
+                progress.post("📊 Moved to *In review*")
 
-            # Update job record
-            with get_session() as session:
-                job = session.get(StoryJob, job_id)
-                job.status = JobStatus.SUCCESS
-                job.pr_number = pr_number
-                job.branch_name = branch_name
-                job.files_changed = ",".join(result.files_changed)
-                job.passes_used = result.passes_used
-                job.completed_at = datetime.now(UTC)
-                session.add(job)
-                session.commit()
+                # Update job record
+                with get_session() as session:
+                    job = session.get(StoryJob, job_id)
+                    job.status = JobStatus.SUCCESS
+                    job.pr_number = pr_number
+                    job.branch_name = branch_name
+                    job.files_changed = ",".join(result.files_changed)
+                    job.passes_used = result.passes_used
+                    job.completed_at = datetime.now(UTC)
+                    session.add(job)
+                    session.commit()
 
-            # Compress memory
-            new_facts = (
-                f"Completed story #{issue_number}: {title}\n"
-                f"Branch: {branch_name}, PR: #{pr_number}\n"
-                f"Files: {', '.join(result.files_changed)}\n"
-                f"Passes: {result.passes_used}"
-            )
-            agent.compress_and_save_memory(llm, new_facts)
+                # Compress memory
+                new_facts = (
+                    f"Completed story #{issue_number}: {title}\n"
+                    f"Branch: {branch_name}, PR: #{pr_number}\n"
+                    f"Files: {', '.join(result.files_changed)}\n"
+                    f"Passes: {result.passes_used}"
+                )
+                agent.compress_and_save_memory(llm, new_facts)
+
+            except Exception as pr_err:
+                logger.exception(
+                    "worker.pr_creation_failed",
+                    issue_number=issue_number,
+                    branch=branch_name,
+                )
+                # Code is pushed — move to Blocked so a human can create the PR
+                # manually. Do NOT move back to Ready (that would re-run the agent).
+                try:
+                    asyncio.run(_move_status("Blocked"))
+                except Exception:
+                    pass
+                branch_url = f"https://github.com/{settings.github_repo}/tree/{branch_name}"
+                try:
+                    pr_manager.comment_on_issue(
+                        issue_number,
+                        f"🤖 SamBot finished coding but failed to create the PR.\n\n"
+                        f"**Error:** {pr_err}\n\n"
+                        f"The code is pushed to [`{branch_name}`]({branch_url}). "
+                        f"Please create the PR manually or move back to *Ready* to retry.",
+                    )
+                except Exception:
+                    pass
+                with get_session() as session:
+                    job = session.get(StoryJob, job_id)
+                    job.status = JobStatus.FAILED
+                    job.error_message = f"PR creation failed: {pr_err}"
+                    job.branch_name = branch_name
+                    job.files_changed = ",".join(result.files_changed)
+                    job.passes_used = result.passes_used
+                    job.completed_at = datetime.now(UTC)
+                    session.add(job)
+                    session.commit()
+                return {
+                    "issue_number": issue_number,
+                    "status": "blocked",
+                    "error": f"PR creation failed: {pr_err}",
+                    "branch": branch_name,
+                }
 
             return {
                 "issue_number": issue_number,
@@ -521,17 +651,37 @@ def process_story(issue_number: int) -> dict:
             # Failed / Blocked
             progress.post(result.summary)
 
+            # Push WIP branch so the user can inspect the in-progress work
+            branch_url: str | None = None
+            try:
+                _push_wip_branch(
+                    work_dir,
+                    branch_name,
+                    f"wip(#{issue_number}): blocked after {result.passes_used} pass(es)",
+                )
+                branch_url = f"https://github.com/{settings.github_repo}/tree/{branch_name}"
+                progress.post(f"📤 Pushed WIP branch `{branch_name}` to remote")
+            except Exception:
+                logger.exception("worker.wip_push_failed", branch=branch_name)
+
             # Move to "Blocked"
             asyncio.run(_move_status("Blocked"))
             progress.post("📊 Moved to *Blocked*")
 
+            branch_ref = (
+                f"\n\n**Branch:** [`{branch_name}`]({branch_url})\n"
+                f"You can inspect the in-progress work there."
+                if branch_url else ""
+            )
             pr_manager.comment_on_issue(
                 issue_number,
                 f"🤖 SamBot was unable to complete this story.\n\n"
                 f"**Error:** {result.error}\n"
                 f"**Passes used:** {result.passes_used}\n"
-                f"**Files changed:** {', '.join(result.files_changed) or 'none'}\n\n"
-                f"The story has been moved to *Blocked*.",
+                f"**Files changed:** {', '.join(result.files_changed) or 'none'}"
+                f"{branch_ref}\n\n"
+                f"To retry, reply here with any additional context or instructions, "
+                f"then move this item back to *Ready* on the project board.",
             )
 
             # Update job record
@@ -603,6 +753,8 @@ def merge_approved_pr(pr_number: int) -> dict:
     from sambot.slack.progress import SlackProgressReporter
 
     settings = get_settings()
+    from sambot.logging_config import configure_logging
+    configure_logging(settings, log_filename="worker.log")
     logger.info("job.merge_pr.start", pr_number=pr_number)
 
     # Ensure DB is initialized in this worker process
